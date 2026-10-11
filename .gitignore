@@ -11,7 +11,8 @@
 *.dylib
 *.opalpreset
 *.mlmodelc
-/assets/
+/assets/*
+!/assets/README.md
 
 # Build output
 /target/

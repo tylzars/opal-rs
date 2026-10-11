@@ -1,13 +1,16 @@
-//! Runs against a real disk image when OPAL_COMPOSER_DMG is set.
+//! Runs against assets/<release>.dmg when it is present.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 #[test]
 fn extracts_and_verifies_every_asset() {
-    let Some(dmg) = std::env::var_os("OPAL_COMPOSER_DMG").map(PathBuf::from) else {
-        eprintln!("OPAL_COMPOSER_DMG not set, skipped");
+    let dmg = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets")
+        .join(opal_assets::RELEASES[0].dmg_name);
+    if !dmg.exists() {
+        eprintln!("{} not found, skipped", dmg.display());
         return;
-    };
+    }
     let out = std::env::temp_dir().join(format!("opal-assets-test-{}", std::process::id()));
     let mut written = 0;
     opal_assets::extract(&dmg, &out, |event| {
@@ -15,7 +18,7 @@ fn extracts_and_verifies_every_asset() {
             written += 1;
         }
     })
-    .expect("extraction failed");
+    .unwrap();
     assert_eq!(written, opal_assets::ASSETS.len());
     for (asset, status) in opal_assets::verify(&out).unwrap() {
         assert!(matches!(status, opal_assets::Status::Ok), "{}", asset.file_name);
