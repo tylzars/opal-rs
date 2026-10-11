@@ -1,0 +1,11 @@
+[package]
+name = "opal-dai"
+description = "DepthAI device protocol for the Opal C1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2.190"
+opal-xlink = { version = "0.1.0", path = "../xlink" }
+thiserror = "2.0.21"

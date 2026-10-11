@@ -457,12 +457,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "opal-dai"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "opal-xlink",
+ "thiserror",
+]
+
+[[package]]
 name = "opal-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "opal-assets",
+ "opal-dai",
  "opal-xlink",
 ]
 

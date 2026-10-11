@@ -1,5 +1,11 @@
 //! XLink transport for the Opal C1.
 
+pub mod bootloader;
+pub mod link;
+mod usb;
+
+pub use link::{Error, Link, StreamId};
+
 use nusb::MaybeFuture;
 
 pub const VID: u16 = 0x03e7;
