@@ -22,6 +22,8 @@ enum Command {
         #[command(subcommand)]
         command: AssetsCommand,
     },
+    /// List attached cameras
+    List,
 }
 
 #[derive(Subcommand)]
@@ -73,5 +75,11 @@ fn main() -> Result<ExitCode> {
                 Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE })
             }
         },
+        Command::List => {
+            for d in opal_xlink::list()? {
+                println!("{:?} {:04x} {}", d.state, d.state.pid(), d.serial().unwrap_or("-"));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
