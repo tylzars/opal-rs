@@ -7,6 +7,7 @@ use opal_assets::{Asset, Event, Kind, RELEASES, Status};
 use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
+use opal_dai::message::{CameraControl, af, awb};
 
 /// `assets/` at the repository root.
 const ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
@@ -31,6 +32,8 @@ enum Command {
     Boot,
     /// Boot and print device information
     Info,
+    /// Boot and keep the camera running
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -127,6 +130,24 @@ fn main() -> Result<ExitCode> {
             dev.close();
             Ok(ExitCode::SUCCESS)
         }
+        Command::Run => {
+            let booted = boot(&dir)?;
+            let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
+            let sensor = sensor_name(&dev)?;
+            println!("sensor {sensor}");
+            let streams = dev.start_pipeline(&opal_c1::pipeline(&dir, &sensor)?)?;
+            let control = streams[opal_c1::CONTROL_STREAM];
+            println!("running");
+            for line in std::io::stdin().lines() {
+                let line = line?;
+                match parse_control(&line) {
+                    Some(c) => dev.link().write(control, &c.to_packet())?,
+                    None if line.trim() == "quit" => break,
+                    None => println!("?"),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::List => {
             for d in opal_xlink::list()? {
                 println!("{:?} {:04x} {}", d.state, d.state.pid(), d.serial().unwrap_or("-"));
@@ -134,4 +155,41 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn sensor_name(dev: &Device) -> Result<String> {
+    let names = dev.call("getCameraSensorNames", vec![])?;
+    let first = names
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|p| p.as_array())
+        .context("no camera sensor")?;
+    Ok(first
+        .get(1)
+        .and_then(|s| s.as_str())
+        .context("no camera sensor")?
+        .to_owned())
+}
+
+/// One control command per line, e.g. `focus 120` or `exposure 10000 400`.
+fn parse_control(line: &str) -> Option<CameraControl> {
+    let mut words = line.split_whitespace();
+    let cmd = words.next()?;
+    let args: Vec<i64> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
+    let mut c = CameraControl::default();
+    match (cmd, args.as_slice()) {
+        ("focus", [p]) => c.auto_focus_mode(af::OFF).manual_focus(*p as u8),
+        ("af", []) => c.auto_focus_mode(af::CONTINUOUS_VIDEO),
+        ("exposure", [us, iso]) => c.manual_exposure(*us as u32, *iso as u32),
+        ("ae", []) => c.auto_exposure(),
+        ("ev", [v]) => c.exposure_compensation(*v as i8),
+        ("wb", [k]) => c.white_balance(*k as u16),
+        ("awb", []) => c.auto_white_balance(awb::AUTO),
+        ("brightness", [v]) => c.brightness(*v as i8),
+        ("contrast", [v]) => c.contrast(*v as i8),
+        ("saturation", [v]) => c.saturation(*v as i8),
+        ("sharpness", [v]) => c.sharpness(*v as u8),
+        _ => return None,
+    };
+    Some(c)
 }

@@ -457,6 +457,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "opal-c1"
+version = "0.1.0"
+dependencies = [
+ "opal-dai",
+]
+
+[[package]]
 name = "opal-dai"
 version = "0.1.0"
 dependencies = [
@@ -472,6 +479,7 @@ dependencies = [
  "anyhow",
  "clap",
  "opal-assets",
+ "opal-c1",
  "opal-dai",
  "opal-xlink",
 ]

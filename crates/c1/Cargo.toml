@@ -1,0 +1,9 @@
+[package]
+name = "opal-c1"
+description = "Opal C1 camera pipeline and controls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opal-dai = { version = "0.1.0", path = "../dai" }
