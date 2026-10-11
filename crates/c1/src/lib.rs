@@ -2,10 +2,11 @@
 
 use std::path::Path;
 
-use opal_dai::message::{CameraControl, antibanding};
-use opal_dai::pipeline::{ColorCamera, IspScale, Pipeline, resolution};
+use opal_dai::message::{AudioInConfig, CameraControl, antibanding};
+use opal_dai::pipeline::{AudioMic, ColorCamera, IspScale, Pipeline, resolution};
 
 pub const CONTROL_STREAM: &str = "control";
+pub const MIC_STREAM: &str = "micCfg";
 
 /// Sensor tuning file for each sensor the C1 ships with.
 pub fn tuning_file(sensor: &str) -> Option<&'static str> {
@@ -16,7 +17,7 @@ pub fn tuning_file(sensor: &str) -> Option<&'static str> {
     }
 }
 
-/// Camera into UVC, with a control stream.
+/// Camera into UVC and microphone into UAC, with control streams.
 pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     let mut p = Pipeline::default();
     let mut control = CameraControl::default();
@@ -41,5 +42,11 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     p.link(cam, "video", uvc, "in");
     let ctrl = p.xlink_in(CONTROL_STREAM, 1024);
     p.link(ctrl, "out", cam, "inputControl");
+
+    let mic = p.audio_mic(&AudioMic::default());
+    let uac = p.uac(AudioInConfig::default());
+    p.link(mic, "out", uac, "input");
+    let mic_cfg = p.xlink_in(MIC_STREAM, 256);
+    p.link(mic_cfg, "out", mic, "inputConfig");
     Ok(p)
 }

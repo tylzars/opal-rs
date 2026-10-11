@@ -80,11 +80,6 @@ impl Bootloader {
         Ok(i32::from_le_bytes(r[4..8].try_into().unwrap()))
     }
 
-    /// Resets the device, which returns it to the application in flash.
-    pub fn reset(self) -> Result<(), Error> {
-        self.link.reset()
-    }
-
     /// Sends an application image to RAM and starts it. The link drops when it boots.
     pub fn boot_memory(self, image: &[u8]) -> Result<(), Error> {
         let packets = image.len().div_ceil(STREAM_SIZE as usize) as u32;

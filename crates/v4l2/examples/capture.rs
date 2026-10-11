@@ -22,7 +22,10 @@ fn main() -> std::io::Result<()> {
                 let sharp = (0..h as usize - 1)
                     .step_by(7)
                     .flat_map(|r| (0..row - 1).step_by(5).map(move |c| r * row + c))
-                    .map(|i| (y[i] as i32 - y[i + 1] as i32).unsigned_abs() as u64 + (y[i] as i32 - y[i + row] as i32).unsigned_abs() as u64)
+                    .map(|i| {
+                        (y[i] as i32 - y[i + 1] as i32).unsigned_abs() as u64
+                            + (y[i] as i32 - y[i + row] as i32).unsigned_abs() as u64
+                    })
                     .sum::<u64>();
                 println!("seq {} mean luma {mean} sharpness {sharp}", f.sequence);
             }

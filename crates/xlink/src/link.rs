@@ -258,17 +258,6 @@ impl Link {
         Ok(packet)
     }
 
-    /// Asks the device to reset and drops the link.
-    pub fn reset(&self) -> Result<(), Error> {
-        let h = Header {
-            id: next_id(),
-            kind: RESET_REQ,
-            flags: ACK,
-            ..Default::default()
-        };
-        self.send(&h, &[])
-    }
-
     /// Waits until the reader sees the link go down.
     pub fn wait_closed(&self, timeout: Duration) -> bool {
         let deadline = Some(Instant::now() + timeout);

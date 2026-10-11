@@ -160,7 +160,7 @@ impl Device {
         decode_response(&resp)
     }
 
-    /// Resets the camera and ends the session.
+    /// Ends the session. The camera restarts on its own once the watchdog stops.
     pub fn close(mut self) {
         self.shutdown();
     }
@@ -169,10 +169,11 @@ impl Device {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = self.link.reset();
-        self.link.wait_closed(Duration::from_secs(2));
-        for t in self.threads.drain(..) {
-            let _ = t.join();
+        // An XLink reset can leave the camera off the bus, so let its watchdog expire instead.
+        if self.link.wait_closed(Duration::from_secs(10)) {
+            for t in self.threads.drain(..) {
+                let _ = t.join();
+            }
         }
     }
 }

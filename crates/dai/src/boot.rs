@@ -36,8 +36,8 @@ pub fn boot(
 ) -> Result<Found, Error> {
     let serial = device.serial().unwrap_or_default().to_owned();
     let device = match device.state {
-        State::Booted => return Ok(device.clone()),
-        State::FlashBooted => {
+        // Booted is an application left running by an earlier session.
+        State::FlashBooted | State::Booted => {
             on_step(Step::Rebooting);
             bootloader::reboot_to_bootloader(&device.info)?;
             bootloader::wait_for(&serial, State::Bootloader, Duration::from_secs(5))
@@ -50,7 +50,7 @@ pub fn boot(
     let bl = Bootloader::connect(&device.info)?;
     let version = bl.version()?;
     if version < MIN_BOOTLOADER {
-        let _ = bl.reset();
+        drop(bl);
         return Err(Error::OldBootloader(version));
     }
     let kind = bl.kind()?;

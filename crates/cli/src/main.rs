@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -7,7 +8,7 @@ use opal_assets::{Asset, Event, Kind, RELEASES, Status};
 use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
-use opal_dai::message::{CameraControl, af, awb};
+use opal_dai::message::{AudioInConfig, CameraControl, af, awb};
 
 /// `assets/` at the repository root.
 const ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
@@ -59,8 +60,21 @@ fn firmware_asset() -> &'static Asset {
         .expect("manifest has firmware")
 }
 
+fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
+    let start = Instant::now();
+    loop {
+        if let Some(d) = opal_xlink::list()?.into_iter().next() {
+            return Ok(Some(d));
+        }
+        if start.elapsed() > timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn boot(dir: &Path) -> Result<opal_xlink::Found> {
-    let device = opal_xlink::list()?.into_iter().next().context("no camera found")?;
+    let device = wait_for_camera(Duration::from_secs(20))?.context("no camera found")?;
     let firmware = opal_assets::load(dir, firmware_asset())?;
     let config = BoardConfig {
         uvc_enable: Some(true),
@@ -137,13 +151,18 @@ fn main() -> Result<ExitCode> {
             println!("sensor {sensor}");
             let streams = dev.start_pipeline(&opal_c1::pipeline(&dir, &sensor)?)?;
             let control = streams[opal_c1::CONTROL_STREAM];
+            let mic = streams[opal_c1::MIC_STREAM];
             println!("running");
             for line in std::io::stdin().lines() {
                 let line = line?;
-                match parse_control(&line) {
-                    Some(c) => dev.link().write(control, &c.to_packet())?,
-                    None if line.trim() == "quit" => break,
-                    None => println!("?"),
+                let mut words = line.split_whitespace();
+                match (words.next(), words.next().and_then(|w| w.parse::<f32>().ok())) {
+                    (Some("quit"), _) => break,
+                    (Some("gain"), Some(db)) => dev.link().write(mic, &AudioInConfig::gain_db(db).to_packet())?,
+                    _ => match parse_control(&line) {
+                        Some(c) => dev.link().write(control, &c.to_packet())?,
+                        None => println!("?"),
+                    },
                 }
             }
             Ok(ExitCode::SUCCESS)
