@@ -432,3 +432,125 @@ mod tests {
         assert_eq!(split(&p), Some((&[1u8, 2][..], 7, &[9u8][..])));
     }
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorInfo {
+    pub order: i32,
+    pub data_type: i32,
+    pub num_dimensions: u32,
+    pub dims: Vec<u32>,
+    pub strides: Vec<u32>,
+    pub name: String,
+    pub offset: u32,
+}
+nop_struct!(TensorInfo {
+    order,
+    data_type,
+    num_dimensions,
+    dims,
+    strides,
+    name,
+    offset
+});
+
+pub const TENSOR_FP16: i32 = 0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NnData {
+    pub tensors: Vec<TensorInfo>,
+    pub batch_size: u32,
+    pub sequence_num: i64,
+    pub ts: crate::device::Timestamp,
+    pub ts_device: crate::device::Timestamp,
+}
+nop_struct!(NnData {
+    tensors,
+    batch_size,
+    sequence_num,
+    ts,
+    ts_device
+});
+
+impl NnData {
+    /// Parses an NNData packet and returns its metadata and tensor bytes.
+    pub fn parse(packet: &[u8]) -> Option<(NnData, &[u8])> {
+        let (data, kind, meta) = split(packet)?;
+        if kind != NN_DATA {
+            return None;
+        }
+        Some((nop::from_slice(meta).ok()?, data))
+    }
+
+    /// The named tensor's values, converted to f32. Only FP16 tensors are supported.
+    pub fn tensor_f32(&self, data: &[u8], name: &str) -> Option<Vec<f32>> {
+        let t = self.tensors.iter().find(|t| t.name == name)?;
+        if t.data_type != TENSOR_FP16 {
+            return None;
+        }
+        let count = t.dims.iter().product::<u32>() as usize;
+        let bytes = data.get(t.offset as usize..t.offset as usize + count * 2)?;
+        Some(
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f16_to_f32(u16::from_le_bytes(*b)))
+                .collect(),
+        )
+    }
+}
+
+/// IEEE 754 half to single precision.
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) as u32) << 31;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let frac = (h & 0x3ff) as u32;
+    let bits = match exp {
+        0 if frac == 0 => sign,
+        0 => {
+            // subnormal: normalise
+            let mut e = 127 - 15 + 1;
+            let mut f = frac;
+            while f & 0x400 == 0 {
+                f <<= 1;
+                e -= 1;
+            }
+            sign | (e << 23) | ((f & 0x3ff) << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (frac << 13),
+        _ => sign | ((exp + 127 - 15) << 23) | (frac << 13),
+    };
+    f32::from_bits(bits)
+}
+
+#[cfg(test)]
+mod nn_tests {
+    use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn nn_data_vector() {
+        let meta = hex(
+            "b9 05 ba 01 b9 07 85 21 43 00 02 bc 08 01 00 00 00 0a 00 00 00 bc 08 14 00 00 00 02 00 00 00 \
+             bd 03 6f 75 74 00 01 05 b9 02 00 00 b9 02 00 00",
+        );
+        let d: NnData = nop::from_slice(&meta).unwrap();
+        assert_eq!(d.tensors[0].name, "out");
+        assert_eq!(d.tensors[0].dims, [1, 10]);
+        assert_eq!(d.sequence_num, 5);
+    }
+
+    #[test]
+    fn half_floats() {
+        assert_eq!(f16_to_f32(0x3c00), 1.0);
+        assert_eq!(f16_to_f32(0xc000), -2.0);
+        assert_eq!(f16_to_f32(0x3800), 0.5);
+        assert_eq!(f16_to_f32(0x0001), 5.960_464_5e-8);
+        assert_eq!(f16_to_f32(0), 0.0);
+    }
+}

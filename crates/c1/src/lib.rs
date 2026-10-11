@@ -7,6 +7,42 @@ use opal_dai::pipeline::{AudioMic, ColorCamera, IspScale, Pipeline, resolution};
 
 pub const CONTROL_STREAM: &str = "control";
 pub const MIC_STREAM: &str = "micCfg";
+pub const LED_STREAM: &str = "led";
+
+/// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
+const LED_SCRIPT: &str = r#"
+import GPIO
+
+PINS = (58, 37, 34)
+for pin in PINS:
+    GPIO.setup(pin, GPIO.OUT)
+    GPIO.write(pin, 0)
+
+while True:
+    rgb = node.io["led"].get().getData()
+    for pin, value in zip(PINS, rgb):
+        GPIO.write(pin, 1 if value else 0)
+"#;
+
+/// Status LED states used by Opal Composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Led {
+    Off,
+    White,
+    Blue,
+}
+
+impl Led {
+    /// Message for the LED stream.
+    pub fn packet(self) -> Vec<u8> {
+        let rgb: [u8; 3] = match self {
+            Led::Off => [0, 0, 0],
+            Led::White => [1, 1, 1],
+            Led::Blue => [0, 0, 1],
+        };
+        opal_dai::message::buffer_packet(&rgb)
+    }
+}
 
 /// Sensor tuning file for each sensor the C1 ships with.
 pub fn tuning_file(sensor: &str) -> Option<&'static str> {
@@ -48,5 +84,9 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     p.link(mic, "out", uac, "input");
     let mic_cfg = p.xlink_in(MIC_STREAM, 256);
     p.link(mic_cfg, "out", mic, "inputConfig");
+
+    let led = p.script(LED_SCRIPT, &["led"], &[]);
+    let led_in = p.xlink_in(LED_STREAM, 64);
+    p.link(led_in, "out", led, "led");
     Ok(p)
 }

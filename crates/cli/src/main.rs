@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use opal_assets::{Asset, Event, Kind, RELEASES, Status};
+use opal_c1::Led;
 use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
@@ -152,6 +153,7 @@ fn main() -> Result<ExitCode> {
             let streams = dev.start_pipeline(&opal_c1::pipeline(&dir, &sensor)?)?;
             let control = streams[opal_c1::CONTROL_STREAM];
             let mic = streams[opal_c1::MIC_STREAM];
+            let led = streams[opal_c1::LED_STREAM];
             println!("running");
             for line in std::io::stdin().lines() {
                 let line = line?;
@@ -159,6 +161,12 @@ fn main() -> Result<ExitCode> {
                 match (words.next(), words.next().and_then(|w| w.parse::<f32>().ok())) {
                     (Some("quit"), _) => break,
                     (Some("gain"), Some(db)) => dev.link().write(mic, &AudioInConfig::gain_db(db).to_packet())?,
+                    (Some("led"), _) => match line.split_whitespace().nth(1) {
+                        Some("off") => dev.link().write(led, &Led::Off.packet())?,
+                        Some("white") => dev.link().write(led, &Led::White.packet())?,
+                        Some("blue") => dev.link().write(led, &Led::Blue.packet())?,
+                        _ => println!("?"),
+                    },
                     _ => match parse_control(&line) {
                         Some(c) => dev.link().write(control, &c.to_packet())?,
                         None => println!("?"),
