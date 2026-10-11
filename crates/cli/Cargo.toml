@@ -1,0 +1,16 @@
+[package]
+name = "opal-rs"
+description = "Opal C1 tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opal-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+opal-assets = { path = "../assets" }

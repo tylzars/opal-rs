@@ -1,0 +1,17 @@
+# Never commit anything taken from Opal Composer: disk images, firmware, neural networks,
+# tuning data, scripts, presets or extracted files
+*.dmg
+*.cmd
+*.tlv
+*.evn
+*.sfo
+*.blob
+*.bin
+*.patch
+*.dylib
+*.opalpreset
+*.mlmodelc
+/assets/
+
+# Build output
+/target/
