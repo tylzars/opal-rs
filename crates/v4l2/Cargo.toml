@@ -1,0 +1,9 @@
+[package]
+name = "opal-v4l2"
+description = "Minimal V4L2 capture and output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2.190"
