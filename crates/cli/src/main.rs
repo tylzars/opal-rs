@@ -54,7 +54,7 @@ enum Command {
         /// v4l2loopback device to write video to
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Background blur radius in pixels, 0 for none [default: saved setting]
+        /// Background blur radius in pixels of a 1080p picture, 0 for none [default: saved setting]
         #[arg(long)]
         blur: Option<usize>,
         /// Colour lookup table (.cube) to apply [default: saved setting]

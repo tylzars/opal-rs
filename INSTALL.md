@@ -45,7 +45,7 @@
    opal-rs ctl antibanding 50 # remove flicker from 50 Hz lights: 50, 60, off or auto (by time zone, the default)
    opal-rs ctl gain 20        # microphone gain in dB
    opal-rs ctl mic off        # mute the microphone; mic on turns it back on
-   opal-rs ctl blur 24        # blur the background, radius in pixels; blur 0 turns it off
+   opal-rs ctl blur 24        # blur the background, radius in pixels of a 1080p picture; blur 0 turns it off
    opal-rs ctl bokeh lens     # lens look for the blur, bright lights become soft shapes; bokeh soft goes back
    opal-rs ctl background ~/Pictures/beach.jpg   # show a picture behind you instead; background off removes it
    opal-rs ctl lut noir 0.8   # colour look at 80%: mono, noir, tonal, fade, chrome, instant, process, transfer, warm or cool
@@ -66,7 +66,7 @@
    opal-rs ctl tone 40 10     # even out skin colour (0 to 100) and warm it (-100 to 100); tone off goes back
    opal-rs ctl gestures on    # hand gestures: a peace sign turns the video off and on, a pinch turns framing on and off
    opal-rs ctl gesture pinch off   # turn one gesture off (peace or pinch); gesture pinch on turns it back on
-   opal-rs ctl resolution 1440p   # 720p, 1080p (default) or 1440p; restarts the camera
+   opal-rs ctl resolution 2160p   # 720p, 1080p (default), 1440p or 2160p (4K); restarts the camera
    opal-rs ctl power low      # low power mode, see below; power normal goes back; restarts the camera
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.

@@ -17,24 +17,25 @@ pub const CONFIG_STREAM: &str = "config";
 /// NV12 video frames from the camera.
 pub const VIDEO_STREAM: &str = "rgb";
 
-/// Video size, scaled by the camera from the sensor's 3840x2160 mode. The full 3840x2160 stops the camera when it
-/// starts streaming, so it is not offered.
+/// Video size, scaled by the camera from the sensor's 3840x2160 mode (2160p is the mode itself).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Resolution {
     P720,
     #[default]
     P1080,
     P1440,
+    P2160,
 }
 
 impl Resolution {
-    pub const ALL: [Resolution; 3] = [Self::P720, Self::P1080, Self::P1440];
+    pub const ALL: [Resolution; 4] = [Self::P720, Self::P1080, Self::P1440, Self::P2160];
 
     pub fn size(self) -> (u32, u32) {
         match self {
             Self::P720 => (1280, 720),
             Self::P1080 => (1920, 1080),
             Self::P1440 => (2560, 1440),
+            Self::P2160 => (3840, 2160),
         }
     }
 
@@ -44,6 +45,7 @@ impl Resolution {
             Self::P720 => (1, 3),
             Self::P1080 => (1, 2),
             Self::P1440 => (2, 3),
+            Self::P2160 => (1, 1),
         }
     }
 
@@ -52,6 +54,7 @@ impl Resolution {
             Self::P720 => "720p",
             Self::P1080 => "1080p",
             Self::P1440 => "1440p",
+            Self::P2160 => "2160p",
         }
     }
 

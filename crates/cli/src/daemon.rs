@@ -687,7 +687,7 @@ impl Session {
                 Ok(String::new())
             }
             ["resolution", name] => {
-                let res = Resolution::parse(name).ok_or_else(|| anyhow!("resolution 720p, 1080p or 1440p"))?;
+                let res = Resolution::parse(name).ok_or_else(|| anyhow!("resolution 720p, 1080p, 1440p or 2160p"))?;
                 if res != self.resolution {
                     RESTART.store(true, Ordering::Relaxed);
                 }
@@ -1222,7 +1222,8 @@ pub fn run(
                     effects.replace(&mut frame, mask, bg);
                 }
                 if let (r @ 1.., Some(mask), None, true) = (radius, &mask, &background, frame.len() >= w * h * 3 / 2) {
-                    effects.apply(&mut frame, mask, r);
+                    // The radius is in pixels of a 1080p picture, so it looks the same at every size.
+                    effects.apply(&mut frame, mask, (r * h / 1080).max(1));
                 }
                 let crop = {
                     let mut zoom = session.zoom.lock().unwrap();

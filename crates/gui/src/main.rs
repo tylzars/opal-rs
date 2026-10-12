@@ -15,7 +15,12 @@ use std::time::Duration;
 use eframe::egui;
 
 const VIDEO: &str = "/dev/video10";
-const RESOLUTIONS: [(&str, usize, usize); 3] = [("720p", 1280, 720), ("1080p", 1920, 1080), ("1440p", 2560, 1440)];
+const RESOLUTIONS: [(&str, usize, usize); 4] = [
+    ("720p", 1280, 720),
+    ("1080p", 1920, 1080),
+    ("1440p", 2560, 1440),
+    ("2160p", 3840, 2160),
+];
 
 fn video_size(name: &str) -> (usize, usize) {
     RESOLUTIONS

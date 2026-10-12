@@ -13,6 +13,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 ## What it does
 - Boots the camera's firmware from RAM and runs it as a webcam: video goes to a virtual camera
   ("Opal C1 Virtual", via `v4l2loopback`), the microphone appears as a normal USB microphone.
+- Video at 720p, 1080p, 1440p or 4K (2160p).
 - Streams only while an app uses the camera; the status LED is white while it streams, and blue while your video
   is off but the camera still watches for gestures.
 - Focus, exposure, white balance, light flicker (50/60 Hz), image adjustments, zoom, microphone gain and mute.

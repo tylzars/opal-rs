@@ -113,16 +113,33 @@ impl Handle {
     }
 }
 
-/// Every `step`-th pixel of a `width` x `height` NV12 frame as RGB.
+/// A `width` x `height` NV12 frame shrunk `step` times as RGB, each pixel the average of its block (sampling single
+/// pixels would make fine detail look like grain).
 fn nv12_to_rgb_small(frame: &[u8], width: usize, height: usize, step: usize) -> Vec<u8> {
     let (w, h) = (width / step, height / step);
+    let chroma = &frame[width * height..];
     let mut out = Vec::with_capacity(w * h * 3);
     for y in 0..h {
+        let (y0, y1) = (y * step, (y + 1) * step);
+        // Chroma rows and pair columns covering the block.
+        let (cy0, cy1) = (y0 / 2, (y1 - 1) / 2);
         for x in 0..w {
-            let (sx, sy) = (x * step, y * step);
-            let luma = frame[sy * width + sx] as f32;
-            let c = width * height + (sy / 2) * width + (sx / 2) * 2;
-            let (u, v) = (frame[c] as f32 - 128.0, frame[c + 1] as f32 - 128.0);
+            let (x0, x1) = (x * step, (x + 1) * step);
+            let luma: u32 = (y0..y1)
+                .flat_map(|r| &frame[r * width + x0..r * width + x1])
+                .map(|&p| p as u32)
+                .sum();
+            let luma = luma as f32 / (step * step) as f32;
+            let (cx0, cx1) = (x0 / 2, (x1 - 1) / 2);
+            let (mut su, mut sv) = (0u32, 0u32);
+            for r in cy0..=cy1 {
+                for c in cx0..=cx1 {
+                    su += chroma[r * width + 2 * c] as u32;
+                    sv += chroma[r * width + 2 * c + 1] as u32;
+                }
+            }
+            let n = ((cy1 - cy0 + 1) * (cx1 - cx0 + 1)) as f32;
+            let (u, v) = (su as f32 / n - 128.0, sv as f32 / n - 128.0);
             let px = [luma + 1.402 * v, luma - 0.344_136 * u - 0.714_136 * v, luma + 1.772 * u];
             out.extend(px.map(|p| p.clamp(0.0, 255.0) as u8));
         }
@@ -144,4 +161,29 @@ pub fn camera_node() -> PathBuf {
             || PathBuf::from("/dev/video0"),
             |e| PathBuf::from("/dev").join(e.file_name()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_preview_averages_blocks() {
+        let (w, h) = (12, 6);
+        // Luma alternates 0 and 200 per pixel; chroma is neutral.
+        let mut f: Vec<u8> = (0..w * h)
+            .map(|i| if (i % w + i / w) % 2 == 0 { 0 } else { 200 })
+            .collect();
+        f.extend(std::iter::repeat_n(128, w * h / 2));
+        for step in [2, 3, 6] {
+            let rgb = nv12_to_rgb_small(&f, w, h, step);
+            assert_eq!(rgb.len(), (w / step) * (h / step) * 3);
+            // Every block is near the average of 100 (odd blocks hold 4 or 5 bright pixels of 9).
+            assert!(
+                rgb.iter().all(|&p| p.abs_diff(100) <= 12),
+                "step {step}: {:?}",
+                &rgb[..3]
+            );
+        }
+    }
 }

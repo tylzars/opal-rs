@@ -176,6 +176,29 @@ impl YuvLut {
         out.map(|c| (c + (1 << 23)) >> 24)
     }
 
+    /// Grid row offsets and weights of the four U, V corners around (u, v), shared by a 2x2 block of pixels.
+    fn uv_weights(&self, u: u8, v: u8) -> [(usize, u32); 4] {
+        let (tu, tv) = (self.taps[u as usize], self.taps[v as usize]);
+        let mut out = [(0, 0); 4];
+        for (k, (du, dv)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let w = (if du == 1 { tu.1 } else { 256 - tu.1 }) as u32 * (if dv == 1 { tv.1 } else { 256 - tv.1 }) as u32;
+            out[k] = (((tv.0 as usize + dv) * GRID + tu.0 as usize + du) * GRID, w);
+        }
+        out
+    }
+
+    /// The Y output of [`Self::lookup`] for one pixel, given its block's [`Self::uv_weights`].
+    fn lookup_y(&self, y: u8, block: &[(usize, u32); 4]) -> u32 {
+        let ty = self.taps[y as usize];
+        let (w0, w1) = ((256 - ty.1) as u32, ty.1 as u32);
+        let mut out = 0u32;
+        for &(row, w) in block {
+            let i = row + ty.0 as usize;
+            out += (self.grid[i][0] as u32 * w0 + self.grid[i + 1][0] as u32 * w1) * w;
+        }
+        (out + (1 << 23)) >> 24
+    }
+
     /// Applies the table to an NV12 frame. `amount` 1 is the full look, 0 leaves the frame unchanged.
     pub fn apply(&self, frame: &mut [u8], width: usize, height: usize, amount: f32) {
         let amount = (amount.clamp(0.0, 1.0) * 256.0) as i32;
@@ -190,11 +213,12 @@ impl YuvLut {
                         let (top, bottom) = pair.split_at_mut(width);
                         for (x, uv) in uv_row.as_chunks_mut::<2>().0.iter_mut().enumerate() {
                             let (u, v) = (uv[0], uv[1]);
+                            let block = self.uv_weights(u, v);
                             let px = [&mut top[2 * x..2 * x + 2], &mut bottom[2 * x..2 * x + 2]];
                             let mut sum = 0u32;
                             for p in px.into_iter().flatten() {
                                 sum += *p as u32;
-                                *p = mix(*p, self.lookup(*p, u, v)[0]);
+                                *p = mix(*p, self.lookup_y(*p, &block));
                             }
                             let out = self.lookup(((sum + 2) / 4) as u8, u, v);
                             uv[0] = mix(u, out[1]);
@@ -210,6 +234,27 @@ impl YuvLut {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luma_lookup_matches_the_full_one() {
+        let mut cube = Cube::parse(&identity(9)).unwrap();
+        for (i, c) in cube.data.iter_mut().enumerate() {
+            *c = [
+                (c[0] * 0.8 + 0.1).min(1.0),
+                c[1] * c[1],
+                (c[2] + (i % 7) as f32 * 0.01).min(1.0),
+            ];
+        }
+        let lut = YuvLut::new(&cube);
+        for y in (0..=255).step_by(3) {
+            for u in (0..=255).step_by(17) {
+                for v in (0..=255).step_by(13) {
+                    let block = lut.uv_weights(u, v);
+                    assert_eq!(lut.lookup_y(y, &block), lut.lookup(y, u, v)[0], "{y} {u} {v}");
+                }
+            }
+        }
+    }
 
     fn identity(n: usize) -> String {
         let mut s = format!("TITLE \"id\"\nLUT_3D_SIZE {n}\n");

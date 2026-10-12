@@ -2,8 +2,10 @@
 
 use std::thread;
 
-/// Downscale factor of the blurred luma plane.
-const SCALE: usize = 4;
+/// Downscale factor of the blurred planes for a frame `height` rows high: the planes stay near 480x270 up to 4K.
+fn scale_for(height: usize) -> usize {
+    if height >= 2160 { 8 } else { 4 }
+}
 const PASSES: usize = 3;
 
 /// Person probability per pixel, 0 to 1, at a low resolution.
@@ -176,6 +178,8 @@ fn par_rows(plane: &mut [u8], row_len: usize, threads: usize, f: impl Fn(usize, 
 pub struct BackgroundBlur {
     width: usize,
     height: usize,
+    /// Frame pixels per blurred-plane pixel, each way.
+    scale: usize,
     small_w: usize,
     small_h: usize,
     threads: usize,
@@ -194,14 +198,16 @@ pub struct BackgroundBlur {
 }
 
 impl BackgroundBlur {
-    /// `width` and `height` must be multiples of 8.
+    /// `width` and `height` must be multiples of 8 (16 from 2160 rows up).
     pub fn new(width: usize, height: usize) -> Self {
-        assert!(width.is_multiple_of(2 * SCALE) && height.is_multiple_of(2 * SCALE));
-        let (small_w, small_h) = (width / SCALE, height / SCALE);
+        let scale = scale_for(height);
+        assert!(width.is_multiple_of(2 * scale) && height.is_multiple_of(2 * scale));
+        let (small_w, small_h) = (width / scale, height / scale);
         let n = small_w * small_h;
         Self {
             width,
             height,
+            scale,
             small_w,
             small_h,
             threads: thread::available_parallelism().map_or(1, |n| n.get()),
@@ -226,7 +232,7 @@ impl BackgroundBlur {
         let (luma, chroma) = frame[..w * h * 3 / 2].split_at_mut(w * h);
         self.downscale(luma, chroma);
 
-        let r = (radius / SCALE).max(1);
+        let r = (radius / self.scale).max(1);
         if self.lens {
             // The hexagon reaches out twice the line half-length.
             lens_plane(&mut self.luma, sw, sh, r, 2.6, self.threads);
@@ -308,29 +314,38 @@ impl BackgroundBlur {
         }
     }
 
-    /// Averages luma over SCALE x SCALE blocks and chroma over 2 x 2 blocks.
+    /// Averages luma over scale x scale blocks, and chroma over the matching blocks of its half-size plane.
     fn downscale(&mut self, luma: &[u8], chroma: &[u8]) {
-        let (w, sw) = (self.width, self.small_w);
+        let (w, sw, s) = (self.width, self.small_w, self.scale);
+        let n = (s * s) as u32;
         par_rows(&mut self.luma, sw, self.threads, |first, rows| {
             for (i, out) in rows.chunks_exact_mut(sw).enumerate() {
-                let src = &luma[(first + i) * SCALE * w..][..SCALE * w];
+                let src = &luma[(first + i) * s * w..][..s * w];
                 for (x, o) in out.iter_mut().enumerate() {
-                    let sum: u32 = (0..SCALE)
-                        .flat_map(|dy| src[dy * w + x * SCALE..][..SCALE].iter())
+                    let sum: u32 = (0..s)
+                        .flat_map(|dy| src[dy * w + x * s..][..s].iter())
                         .map(|&p| p as u32)
                         .sum();
-                    *o = ((sum + 8) / 16) as u8;
+                    *o = ((sum + n / 2) / n) as u8;
                 }
             }
         });
+        // Chroma rows hold w / 2 UV pairs; each small pixel covers c x c pairs.
+        let c = s / 2;
+        let m = (c * c) as u32;
         for sy in 0..self.small_h {
-            let (r0, r1) = (&chroma[2 * sy * w..][..w], &chroma[(2 * sy + 1) * w..][..w]);
             for sx in 0..sw {
-                let i = 4 * sx;
-                let u = r0[i] as u32 + r0[i + 2] as u32 + r1[i] as u32 + r1[i + 2] as u32;
-                let v = r0[i + 1] as u32 + r0[i + 3] as u32 + r1[i + 1] as u32 + r1[i + 3] as u32;
-                self.u[sy * sw + sx] = ((u + 2) / 4) as u8;
-                self.v[sy * sw + sx] = ((v + 2) / 4) as u8;
+                let (mut u, mut v) = (0u32, 0u32);
+                for dy in 0..c {
+                    let row = &chroma[(c * sy + dy) * w..][..w];
+                    for dx in 0..c {
+                        let i = 2 * (c * sx + dx);
+                        u += row[i] as u32;
+                        v += row[i + 1] as u32;
+                    }
+                }
+                self.u[sy * sw + sx] = ((u + m / 2) / m) as u8;
+                self.v[sy * sw + sx] = ((v + m / 2) / m) as u8;
             }
         }
     }
