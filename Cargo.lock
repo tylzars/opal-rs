@@ -3011,6 +3011,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "opal-setup"
+version = "0.1.0"
+dependencies = [
+ "opal-ipc",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "opal-tray"
 version = "0.1.0"
 dependencies = [
