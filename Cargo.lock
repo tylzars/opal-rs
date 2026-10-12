@@ -481,6 +481,7 @@ dependencies = [
  "opal-assets",
  "opal-c1",
  "opal-dai",
+ "opal-v4l2",
  "opal-xlink",
 ]
 

@@ -67,10 +67,12 @@ pub mod cmd {
     pub const AE_MANUAL: u8 = 6;
     pub const AE_AUTO: u8 = 7;
     pub const AWB_MODE: u8 = 8;
+    pub const SCENE_MODE: u8 = 9;
     pub const ANTIBANDING_MODE: u8 = 10;
     pub const EXPOSURE_COMPENSATION: u8 = 11;
     pub const AE_LOCK: u8 = 13;
     pub const AWB_LOCK: u8 = 16;
+    pub const CONTROL_MODE: u8 = 18;
     pub const SATURATION: u8 = 28;
     pub const AF_MODE: u8 = 26;
     pub const BRIGHTNESS: u8 = 31;
@@ -96,6 +98,17 @@ pub mod af {
 pub mod awb {
     pub const OFF: u8 = 0;
     pub const AUTO: u8 = 1;
+}
+
+pub mod scene {
+    pub const UNSUPPORTED: u8 = 0;
+    pub const FACE_PRIORITY: u8 = 1;
+}
+
+pub mod control {
+    pub const OFF: u8 = 0;
+    pub const AUTO: u8 = 1;
+    pub const USE_SCENE_MODE: u8 = 2;
 }
 
 pub mod antibanding {
@@ -212,6 +225,14 @@ impl CameraControl {
         self
     }
 
+    pub fn start_streaming(&mut self) -> &mut Self {
+        self.set(cmd::START_STREAM)
+    }
+
+    pub fn stop_streaming(&mut self) -> &mut Self {
+        self.set(cmd::STOP_STREAM)
+    }
+
     pub fn manual_focus(&mut self, position: u8) -> &mut Self {
         self.lens_position = position;
         self.set(cmd::MOVE_LENS)
@@ -235,6 +256,12 @@ impl CameraControl {
             priority: 1,
         };
         self.set(cmd::AF_REGION)
+    }
+
+    pub fn auto_focus_lens_range(&mut self, infinity: u8, macro_: u8) -> &mut Self {
+        self.lens_pos_auto_infinity = infinity;
+        self.lens_pos_auto_macro = macro_;
+        self.set(cmd::AF_LENS_RANGE)
     }
 
     pub fn auto_focus_lens_limit(&mut self, min: u8, max: u8) -> &mut Self {
@@ -295,6 +322,16 @@ impl CameraControl {
     pub fn white_balance(&mut self, kelvin: u16) -> &mut Self {
         self.wb_color_temp = kelvin;
         self.set(cmd::WB_COLOR_TEMP)
+    }
+
+    pub fn scene_mode(&mut self, mode: u8) -> &mut Self {
+        self.scene_mode = mode;
+        self.set(cmd::SCENE_MODE)
+    }
+
+    pub fn control_mode(&mut self, mode: u8) -> &mut Self {
+        self.control_mode = mode;
+        self.set(cmd::CONTROL_MODE)
     }
 
     pub fn brightness(&mut self, v: i8) -> &mut Self {

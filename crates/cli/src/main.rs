@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,7 +11,7 @@ use opal_c1::Led;
 use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
-use opal_dai::message::{AudioInConfig, CameraControl, af, awb};
+use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, af, awb};
 
 /// `assets/` at the repository root.
 const ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
@@ -35,7 +37,11 @@ enum Command {
     /// Boot and print device information
     Info,
     /// Boot and keep the camera running
-    Run,
+    Run {
+        /// v4l2loopback device to write video to
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -74,8 +80,32 @@ fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
     }
 }
 
+/// Each boot makes the camera drop off USB and come back a few times, so boots are spaced out.
+const MIN_BOOT_INTERVAL: Duration = Duration::from_secs(60);
+
+fn boot_stamp() -> PathBuf {
+    std::env::temp_dir().join("opal-rs-last-boot")
+}
+
+fn check_boot_interval() -> Result<()> {
+    let Ok(modified) = std::fs::metadata(boot_stamp()).and_then(|m| m.modified()) else {
+        return Ok(());
+    };
+    let since = modified.elapsed().unwrap_or_default();
+    if since < MIN_BOOT_INTERVAL {
+        anyhow::bail!(
+            "camera was booted {}s ago, wait {}s",
+            since.as_secs(),
+            (MIN_BOOT_INTERVAL - since).as_secs()
+        );
+    }
+    Ok(())
+}
+
 fn boot(dir: &Path) -> Result<opal_xlink::Found> {
     let device = wait_for_camera(Duration::from_secs(20))?.context("no camera found")?;
+    check_boot_interval()?;
+    std::fs::write(boot_stamp(), b"")?;
     let firmware = opal_assets::load(dir, firmware_asset())?;
     let config = BoardConfig {
         uvc_enable: Some(true),
@@ -145,7 +175,7 @@ fn main() -> Result<ExitCode> {
             dev.close();
             Ok(ExitCode::SUCCESS)
         }
-        Command::Run => {
+        Command::Run { output } => {
             let booted = boot(&dir)?;
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             let sensor = sensor_name(&dev)?;
@@ -154,23 +184,80 @@ fn main() -> Result<ExitCode> {
             let control = streams[opal_c1::CONTROL_STREAM];
             let mic = streams[opal_c1::MIC_STREAM];
             let led = streams[opal_c1::LED_STREAM];
+            let video = Arc::new(Video::default());
+            {
+                let (link, video) = (dev.link().clone(), video.clone());
+                let mut out = match &output {
+                    Some(path) => Some(
+                        opal_v4l2::Output::open(path, opal_c1::VIDEO_WIDTH, opal_c1::VIDEO_HEIGHT, opal_v4l2::NV12)
+                            .with_context(|| path.display().to_string())?,
+                    ),
+                    None => None,
+                };
+                std::thread::spawn(move || {
+                    while let Ok(packet) = link.read(opal_c1::VIDEO_STREAM, None) {
+                        let Some((data, IMG_FRAME, _)) = message::split(&packet) else {
+                            continue;
+                        };
+                        if let Some(out) = &mut out
+                            && let Err(e) = out.write(data)
+                        {
+                            eprintln!("output: {e}");
+                        }
+                        video.frames.fetch_add(1, Ordering::Relaxed);
+                        *video.last.lock().unwrap() = data.to_vec();
+                    }
+                });
+            }
+            let link = dev.link();
+            let set_streaming = |on: bool| -> Result<()> {
+                if on {
+                    link.write(control, &opal_c1::start_control().to_packet())?;
+                    link.write(led, &Led::White.packet())?;
+                } else {
+                    link.write(control, &opal_c1::stop_control().to_packet())?;
+                    link.write(led, &Led::Off.packet())?;
+                }
+                Ok(())
+            };
+            set_streaming(true)?;
+            let mut streaming = true;
             println!("running");
             for line in std::io::stdin().lines() {
                 let line = line?;
                 let mut words = line.split_whitespace();
-                match (words.next(), words.next().and_then(|w| w.parse::<f32>().ok())) {
+                let result = match (words.next(), words.next()) {
                     (Some("quit"), _) => break,
-                    (Some("gain"), Some(db)) => dev.link().write(mic, &AudioInConfig::gain_db(db).to_packet())?,
-                    (Some("led"), _) => match line.split_whitespace().nth(1) {
-                        Some("off") => dev.link().write(led, &Led::Off.packet())?,
-                        Some("white") => dev.link().write(led, &Led::White.packet())?,
-                        Some("blue") => dev.link().write(led, &Led::Blue.packet())?,
-                        _ => println!("?"),
+                    (Some(cmd @ ("on" | "off")), None) => {
+                        let on = cmd == "on";
+                        let r = if on != streaming { set_streaming(on) } else { Ok(()) };
+                        streaming = on;
+                        r
+                    }
+                    (Some("frames"), None) => {
+                        println!("frames {}", video.frames.load(Ordering::Relaxed));
+                        Ok(())
+                    }
+                    (Some("snap"), Some(path)) => video.snap(Path::new(path)),
+                    (Some("gain"), Some(db)) => match db.parse::<f32>() {
+                        Ok(db) => link
+                            .write(mic, &AudioInConfig::gain_db(db).to_packet())
+                            .map_err(Into::into),
+                        Err(e) => Err(e.into()),
+                    },
+                    (Some("led"), Some(color)) => match color {
+                        "off" => link.write(led, &Led::Off.packet()).map_err(Into::into),
+                        "white" => link.write(led, &Led::White.packet()).map_err(Into::into),
+                        "blue" => link.write(led, &Led::Blue.packet()).map_err(Into::into),
+                        _ => Err(anyhow::anyhow!("unknown colour")),
                     },
                     _ => match parse_control(&line) {
-                        Some(c) => dev.link().write(control, &c.to_packet())?,
-                        None => println!("?"),
+                        Some(c) => link.write(control, &c.to_packet()).map_err(Into::into),
+                        None => Err(anyhow::anyhow!("unknown command")),
                     },
+                };
+                if let Err(e) = result {
+                    println!("error: {e}");
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -181,6 +268,26 @@ fn main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Latest video frame from the camera.
+#[derive(Default)]
+struct Video {
+    frames: AtomicU64,
+    last: Mutex<Vec<u8>>,
+}
+
+impl Video {
+    /// Writes the luma plane of the latest frame as a PGM image.
+    fn snap(&self, path: &Path) -> Result<()> {
+        let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
+        let last = self.last.lock().unwrap();
+        anyhow::ensure!(last.len() >= w * h, "no frame yet");
+        let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
+        pgm.extend_from_slice(&last[..w * h]);
+        std::fs::write(path, pgm)?;
+        Ok(())
     }
 }
 

@@ -2,12 +2,18 @@
 
 use std::path::Path;
 
-use opal_dai::message::{AudioInConfig, CameraControl, antibanding};
-use opal_dai::pipeline::{AudioMic, ColorCamera, IspScale, Pipeline, resolution};
+use opal_dai::message::{AudioInConfig, CameraControl, af, antibanding, awb, control, scene};
+use opal_dai::pipeline::{AudioMic, ColorCamera, IspScale, Pipeline, orientation, resolution};
 
 pub const CONTROL_STREAM: &str = "control";
 pub const MIC_STREAM: &str = "micCfg";
 pub const LED_STREAM: &str = "led";
+pub const CONFIG_STREAM: &str = "config";
+/// NV12 video frames from the camera.
+pub const VIDEO_STREAM: &str = "rgb";
+
+pub const VIDEO_WIDTH: u32 = 1920;
+pub const VIDEO_HEIGHT: u32 = 1080;
 
 /// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
 const LED_SCRIPT: &str = r#"
@@ -53,14 +59,57 @@ pub fn tuning_file(sensor: &str) -> Option<&'static str> {
     }
 }
 
-/// Camera into UVC and microphone into UAC, with control streams.
+/// Autofocus lens position range (infinity, macro) for each sensor.
+pub fn lens_range(sensor: &str) -> Option<(u8, u8)> {
+    match sensor {
+        "IMX582" => Some((110, 206)),
+        "IMX378" => Some((120, 206)),
+        _ => None,
+    }
+}
+
+/// Starts streaming with continuous autofocus, auto exposure and auto white balance.
+pub fn start_control() -> CameraControl {
+    let mut c = CameraControl::default();
+    c.start_streaming()
+        .auto_focus_mode(af::CONTINUOUS_VIDEO)
+        .auto_focus_trigger()
+        .auto_white_balance(awb::AUTO)
+        .scene_mode(scene::FACE_PRIORITY)
+        .control_mode(control::USE_SCENE_MODE)
+        .auto_exposure()
+        .saturation(0)
+        .exposure_compensation(0);
+    c
+}
+
+pub fn stop_control() -> CameraControl {
+    let mut c = CameraControl::default();
+    c.stop_streaming();
+    c
+}
+
+/// Camera video to the host over XLink and microphone into UAC, with control streams.
 pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     let mut p = Pipeline::default();
-    let mut control = CameraControl::default();
-    control.anti_banding(antibanding::HZ_60);
+    let mut init = CameraControl::default();
+    init.anti_banding(antibanding::HZ_60)
+        .auto_exposure()
+        .scene_mode(scene::FACE_PRIORITY)
+        .control_mode(control::USE_SCENE_MODE);
+    if let Some((infinity, macro_)) = lens_range(sensor) {
+        init.auto_focus_lens_range(infinity, macro_)
+            .auto_focus_lens_limit(infinity, macro_);
+    }
     let cam = p.color_camera(&ColorCamera {
-        initial_control: control,
+        initial_control: init,
         board_socket: 0,
+        image_orientation: orientation::ROTATE_180,
+        interleaved: false,
+        preview_width: 640,
+        preview_height: 360,
+        video_width: VIDEO_WIDTH as i32,
+        video_height: VIDEO_HEIGHT as i32,
         resolution: resolution::K4,
         fps: 30.0,
         isp_scale: IspScale {
@@ -74,10 +123,12 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     if let Some(file) = tuning_file(sensor) {
         p.set_camera_tuning(std::fs::read(asset_dir.join(file))?);
     }
-    let uvc = p.uvc();
-    p.link(cam, "video", uvc, "in");
+    let video = p.xlink_out(VIDEO_STREAM, false, 3);
+    p.link(cam, "video", video, "in");
     let ctrl = p.xlink_in(CONTROL_STREAM, 1024);
     p.link(ctrl, "out", cam, "inputControl");
+    let config = p.xlink_in(CONFIG_STREAM, 256);
+    p.link(config, "out", cam, "inputConfig");
 
     let mic = p.audio_mic(&AudioMic::default());
     let uac = p.uac(AudioInConfig::default());

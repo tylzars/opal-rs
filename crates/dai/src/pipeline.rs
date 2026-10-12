@@ -218,10 +218,12 @@ nop_struct!(XLinkOut {
     metadata_only
 });
 
-struct Uvc {
-    gpio_init: BTreeMap<i32, i32>,
-    gpio_stream_on: BTreeMap<i32, i32>,
-    gpio_stream_off: BTreeMap<i32, i32>,
+/// GPIO levels the UVC node sets at start and when the host starts or stops streaming.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Uvc {
+    pub gpio_init: BTreeMap<i32, i32>,
+    pub gpio_stream_on: BTreeMap<i32, i32>,
+    pub gpio_stream_off: BTreeMap<i32, i32>,
 }
 nop_struct!(Uvc {
     gpio_init,
@@ -311,7 +313,7 @@ impl Pipeline {
             name: "ColorCamera",
             properties: nop::to_vec(props),
             io: vec![
-                input("inputConfig", false, 8, false),
+                input("inputConfig", false, 1, false),
                 input("inputControl", true, 8, false),
                 output("video"),
                 output("preview"),
@@ -356,15 +358,10 @@ impl Pipeline {
     }
 
     /// USB video output. Input "in".
-    pub fn uvc(&mut self) -> NodeId {
-        let props = Uvc {
-            gpio_init: BTreeMap::new(),
-            gpio_stream_on: BTreeMap::new(),
-            gpio_stream_off: BTreeMap::new(),
-        };
+    pub fn uvc(&mut self, props: &Uvc) -> NodeId {
         self.add(Node {
             name: "UVC",
-            properties: nop::to_vec(&props),
+            properties: nop::to_vec(props),
             io: vec![input("in", true, 8, true)],
             assets: vec![],
         })
@@ -633,6 +630,11 @@ mod tests {
             gpio_stream_off: BTreeMap::new(),
         };
         assert_eq!(nop::to_vec(&u), hex("b9 03 bb 00 bb 00 bb 00"));
+        let u = Uvc {
+            gpio_init: BTreeMap::from([(58, 1)]),
+            ..Default::default()
+        };
+        assert_eq!(nop::to_vec(&u), hex("b9 03 bb 01 3a 01 bb 00 bb 00"));
         assert_eq!(
             nop::to_vec(&AudioMic::default()),
             hex("b9 09 b9 01 b9 03 88 00 00 80 3f 00 00 00 00 81 80 bb 81 a0 05 81 a0 05 01 01 03")
