@@ -27,7 +27,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if !app.message.is_empty() {
             ui.colored_label(egui::Color32::LIGHT_RED, &app.message);
         }
-        if app.status.ends_with("video off") {
+        if app.status_value("video") == Some("off") {
             ui.horizontal(|ui| {
                 ui.label("Video is off. Make a peace sign to turn it back on, or");
                 if ui.button("Turn video back on").clicked() {

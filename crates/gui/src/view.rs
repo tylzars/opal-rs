@@ -282,7 +282,7 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     painter.rect_filled(rect, radius, Color32::from_rgb(0x08, 0x09, 0x0b));
 
     let connected = app.status.starts_with("mode ");
-    let video_off = app.status.ends_with("video off");
+    let video_off = app.status_value("video") == Some("off");
     let running = app.preview.running();
     let showing = running && app.texture.is_some();
     if let (Some(t), true) = (&app.texture, showing) {
