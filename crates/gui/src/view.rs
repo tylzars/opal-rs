@@ -358,6 +358,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         });
     }
 
+    run(app, cmds);
+}
+
+/// Sends the commands, then catches up with what they change: preset lists, settings or a camera restart.
+pub(crate) fn run(app: &mut App, cmds: Vec<String>) {
     let restart = cmds
         .iter()
         .any(|c| c.starts_with("resolution ") || c.starts_with("power "));

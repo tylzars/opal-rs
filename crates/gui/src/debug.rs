@@ -42,6 +42,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 fn controls(app: &mut App, ui: &mut egui::Ui) {
     let mut cmds: Vec<String> = Vec::new();
+    let mut note: Option<&str> = None;
+    let message = &mut note;
     let c = &mut app.c;
 
     ui.heading("Camera");
@@ -180,16 +182,27 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
             cmds.push(format!("blur {}", c.blur_radius));
         }
 
-        ui.horizontal(|ui| {
-            ui.label("Background picture");
-            ui.text_edit_singleline(&mut c.background);
-        });
-        if ui.checkbox(&mut c.background_on, "Replace background").changed() {
-            cmds.push(if c.background_on {
-                format!("background {}", c.background)
+        let picture = ui
+            .horizontal(|ui| {
+                ui.label("Background picture");
+                ui.text_edit_singleline(&mut c.background)
+            })
+            .inner;
+        let entered = picture.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let toggled = ui.checkbox(&mut c.background_on, "Replace background").changed();
+        if !c.background_on {
+            if toggled {
+                cmds.push("background off".into());
+            }
+        } else if toggled || entered {
+            if c.background.trim().is_empty() {
+                // Off here, so off in the service too.
+                c.background_on = false;
+                cmds.push("background off".into());
+                *message = Some("Enter a picture file first.");
             } else {
-                "background off".into()
-            });
+                cmds.push(format!("background {}", c.background.trim()));
+            }
         }
 
         ui.horizontal(|ui| {
@@ -211,24 +224,40 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
         });
+        let mut send_look = false;
         if !opal_effects::LOOKS.contains(&c.look.as_str()) {
-            ui.horizontal(|ui| {
-                ui.label(".cube file");
-                ui.text_edit_singleline(&mut c.look);
-            });
+            let file = ui
+                .horizontal(|ui| {
+                    ui.label(".cube file");
+                    ui.text_edit_singleline(&mut c.look)
+                })
+                .inner;
+            send_look |= c.look_on && file.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         }
         ui.horizontal(|ui| {
             if ui.checkbox(&mut c.look_on, "Use look").changed() {
-                cmds.push(if c.look_on { c.look_cmd() } else { "lut off".into() });
+                if c.look_on {
+                    send_look = true;
+                } else {
+                    cmds.push("lut off".into());
+                }
             }
             let s = ui.add_enabled(
                 c.look_on,
                 egui::Slider::new(&mut c.look_amount, 0.0..=1.0).text("Amount"),
             );
-            if s.drag_stopped() || (s.changed() && !s.dragged()) {
+            send_look |= s.drag_stopped() || (s.changed() && !s.dragged());
+        });
+        if send_look {
+            if c.look.trim().is_empty() {
+                c.look_on = false;
+                cmds.push("lut off".into());
+                *message = Some("Choose a look or enter a .cube file first.");
+            } else {
+                c.look = c.look.trim().to_owned();
                 cmds.push(c.look_cmd());
             }
-        });
+        }
 
         for (name, value) in crate::LIGHTING.iter().zip(c.lighting.iter_mut()) {
             let s = ui.add(egui::Slider::new(value, -100..=100).text(*name));
@@ -268,7 +297,11 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         }
         let s = ui.add(egui::Slider::new(&mut c.magnify, 1.0..=4.0).text("Zoom"));
         if s.drag_stopped() || (s.changed() && !s.dragged()) {
-            cmds.push(format!("magnify {:.1}", c.magnify));
+            cmds.push(if c.magnify > 1.0 {
+                format!("magnify {:.1}", c.magnify)
+            } else {
+                "magnify off".into()
+            });
         }
         if ui.checkbox(&mut c.zoom, "Follow my face").changed() {
             cmds.push(c.zoom_cmd());
@@ -305,8 +338,9 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         });
     });
 
-    for cmd in cmds {
-        app.apply(cmd);
+    crate::view::run(app, cmds);
+    if let Some(note) = note {
+        app.message = note.into();
     }
 }
 
