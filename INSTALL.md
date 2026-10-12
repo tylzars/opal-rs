@@ -45,7 +45,8 @@
    opal-rs ctl gain 20        # microphone gain in dB
    opal-rs ctl blur 24        # blur the background, radius in pixels; blur 0 turns it off
    opal-rs ctl background ~/Pictures/beach.jpg   # show a picture behind you instead; background off removes it
-   opal-rs ctl lut ~/looks/warm.cube 0.8   # colour look from an Adobe .cube file, at 80%; lut off removes it
+   opal-rs ctl lut noir 0.8   # colour look at 80%: mono, noir, tonal, fade, chrome, instant, process, transfer, warm or cool
+   opal-rs ctl lut ~/looks/film.cube   # or a look from an Adobe .cube file; lut off removes it
    opal-rs ctl zoom 0.5       # keep your face framed, 0 loose to 1 tight; zoom off turns it off
    opal-rs ctl tracking slow  # how fast framing follows: slow, normal or fast
    opal-rs ctl gestures on    # hand gestures: a peace sign turns the video off and on, a pinch turns framing on and off

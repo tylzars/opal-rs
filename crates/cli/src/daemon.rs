@@ -130,11 +130,22 @@ struct Look {
     amount: f32,
 }
 
-fn load_look(path: &Path, amount: f32) -> Result<Look> {
-    let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let cube = Cube::parse(&text).with_context(|| path.display().to_string())?;
+/// A built-in look by name, or a .cube file.
+fn load_look(look: &str, amount: f32) -> Result<Look> {
+    let (name, cube) = match opal_effects::builtin_look(look) {
+        Some(cube) => (look.to_owned(), cube),
+        None => {
+            let path = Path::new(look);
+            let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+            let cube = Cube::parse(&text).with_context(|| path.display().to_string())?;
+            (
+                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                cube,
+            )
+        }
+    };
     Ok(Look {
-        name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        name,
         lut: Arc::new(YuvLut::new(&cube)),
         amount,
     })
@@ -372,9 +383,9 @@ impl Session {
                 let amount = match rest {
                     [] => 1.0,
                     [a] => a.parse()?,
-                    _ => bail!("usage: lut <file.cube> [amount]"),
+                    _ => bail!("usage: lut <look or file.cube> [amount]"),
                 };
-                *self.look.lock().unwrap() = Some(load_look(Path::new(path), amount)?);
+                *self.look.lock().unwrap() = Some(load_look(path, amount)?);
                 Ok(String::new())
             }
             ["background", "off"] => {
@@ -899,6 +910,7 @@ pub fn send(words: &[String]) -> Result<bool> {
     if let [cmd, path, ..] = words.as_mut_slice()
         && matches!(cmd.as_str(), "lut" | "snap" | "background")
         && path != "off"
+        && !(cmd == "lut" && opal_effects::LOOKS.contains(&path.as_str()))
     {
         *path = std::path::absolute(&*path)?.display().to_string();
     }

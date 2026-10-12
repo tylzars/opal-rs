@@ -2507,6 +2507,7 @@ name = "opal-gui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "opal-effects",
  "opal-v4l2",
 ]
 

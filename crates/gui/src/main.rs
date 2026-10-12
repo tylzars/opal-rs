@@ -97,7 +97,7 @@ impl Default for Controls {
             blur_radius: 24,
             background: String::new(),
             background_on: false,
-            look: String::new(),
+            look: opal_effects::LOOKS[0].to_owned(),
             look_on: false,
             look_amount: 1.0,
             zoom: false,
@@ -382,9 +382,30 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            ui.label("Look (.cube)");
-            ui.text_edit_singleline(&mut c.look);
+            ui.label("Look");
+            let builtin = opal_effects::LOOKS.contains(&c.look.as_str());
+            egui::ComboBox::from_id_salt("look")
+                .selected_text(if builtin { c.look.as_str() } else { "from file" })
+                .show_ui(ui, |ui| {
+                    for name in opal_effects::LOOKS {
+                        if ui.selectable_label(c.look == name, name).clicked() {
+                            c.look = name.to_owned();
+                            if c.look_on {
+                                cmds.push(format!("lut {} {:.2}", c.look, c.look_amount));
+                            }
+                        }
+                    }
+                    if ui.selectable_label(!builtin, "from file").clicked() && builtin {
+                        c.look.clear();
+                    }
+                });
         });
+        if !opal_effects::LOOKS.contains(&c.look.as_str()) {
+            ui.horizontal(|ui| {
+                ui.label(".cube file");
+                ui.text_edit_singleline(&mut c.look);
+            });
+        }
         ui.horizontal(|ui| {
             if ui.checkbox(&mut c.look_on, "Use look").changed() {
                 cmds.push(if c.look_on {
