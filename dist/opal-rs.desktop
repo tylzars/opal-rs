@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Opal C1
+Comment=Control panel for the Opal C1 camera
+Exec=opal-rs-gui
+Icon=camera-web
+Categories=AudioVideo;Video;Settings;

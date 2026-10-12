@@ -9,6 +9,34 @@ license.workspace = true
 name = "opal-rs"
 path = "src/main.rs"
 
+# `cargo deb`: see "Building the packages" in INSTALL.md.
+[package.metadata.deb]
+name = "opal-rs"
+maintainer = "Tyler Zars <tyler@zars.me>"
+copyright = "Tyler Zars"
+license-file = ["../../LICENSE-MIT", "0"]
+extended-description = """\
+Host software for the Opal C1 webcam: boots the camera from RAM and runs it as a webcam with effects, through the \
+"Opal C1 Virtual" camera. No Opal software is included: the camera files are copied out of the user's own Opal \
+Composer disk image, which the control panel asks for on first run."""
+section = "video"
+priority = "optional"
+depends = "$auto, systemd, udev, kmod"
+recommends = "v4l2loopback-dkms, zenity"
+maintainer-scripts = "../../dist/deb/"
+assets = [
+    ["target/release/opal-rs", "usr/bin/", "755"],
+    ["target/release/opal-rs-gui", "usr/bin/", "755"],
+    ["target/release/opal-rs-tray", "usr/bin/", "755"],
+    ["../../dist/70-opal-c1.rules", "usr/lib/udev/rules.d/", "644"],
+    ["../../dist/v4l2loopback.conf", "usr/lib/modprobe.d/opal-rs-v4l2loopback.conf", "644"],
+    ["../../dist/deb/opal-rs-modules.conf", "usr/lib/modules-load.d/opal-rs.conf", "644"],
+    ["../../dist/deb/opal-rs.service", "usr/lib/systemd/user/", "644"],
+    ["../../dist/opal-rs-tray.desktop", "etc/xdg/autostart/", "644"],
+    ["../../dist/opal-rs.desktop", "usr/share/applications/", "644"],
+    ["../../README.md", "usr/share/doc/opal-rs/", "644"],
+]
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }

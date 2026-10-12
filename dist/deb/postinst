@@ -1,0 +1,13 @@
+#!/bin/sh
+# Applies the USB rule and the virtual camera now, and starts the service at every login.
+set -e
+if [ "$1" = configure ]; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=usb --attr-match=idVendor=03e7 || true
+    if ! grep -q '^v4l2loopback ' /proc/modules; then
+        modprobe v4l2loopback || echo "opal-rs: could not load v4l2loopback; is v4l2loopback-dkms installed?"
+    elif [ ! -e /dev/video10 ]; then
+        echo "opal-rs: v4l2loopback is already loaded with other settings; restart the computer for the Opal C1 Virtual camera."
+    fi
+    systemctl --global enable opal-rs.service || true
+fi
