@@ -147,7 +147,6 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
             Err(mpsc::RecvTimeoutError::Timeout) if shared.state.lock().unwrap().closed.is_none() => continue,
             Err(_) => break,
         };
-        note(&shared, "out", &Header::decode(&header));
         let result = writer.write_all(&header).and_then(|_| {
             if payload.is_empty() {
                 Ok(())
@@ -155,6 +154,8 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
                 writer.write_all(&payload)
             }
         });
+        // Noted once sent, so a trace shows whether writes were still getting through.
+        note(&shared, "out", &Header::decode(&header));
         if let Err(e) = result {
             let mut st = shared.state.lock().unwrap();
             st.closed.get_or_insert_with(|| e.to_string());
@@ -346,6 +347,11 @@ impl Link {
         };
         self.request(h, &[], None)?;
         Ok(packet)
+    }
+
+    /// The last packets each way and how full each stream is, for diagnosis.
+    pub fn trace(&self) -> String {
+        dump(&self.shared)
     }
 
     /// Time since the device last sent anything.
