@@ -33,6 +33,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Shows a camera-off picture while your video is off, and turns the camera off while the screen is locked.
 - A tray icon shows when the camera is on and turns the video on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
+- `opal-rs webcam` runs the camera as an ordinary webcam with no service, on Linux or (experimental) Windows.
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
 

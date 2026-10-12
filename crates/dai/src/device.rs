@@ -181,6 +181,7 @@ impl Device {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.link.ending();
         // An XLink reset can leave the camera off the bus, so let its watchdog expire instead.
         if self.link.wait_closed(Duration::from_secs(10)) {
             for t in self.threads.drain(..) {

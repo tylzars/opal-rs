@@ -1,7 +1,7 @@
 # Installing
 
 ## Requirements
-- Linux
+- Linux (Windows: see [Windows](#windows-experimental))
 - A Rust toolchain (`cargo`)
 - Your own copy of the Opal Composer disk image listed in [README.md](README.md)
 
@@ -101,6 +101,24 @@
 
 Starting the service reboots the camera, which drops it off USB for a few seconds. `opal-rs` refuses to boot it again
 within a minute.
+
+## Windows (experimental)
+On Windows only `opal-rs webcam` is available: it boots the camera in low power mode and keeps its own 1080p video on
+until Ctrl-C, so apps see an ordinary webcam with autofocus and auto exposure. There are no effects, no control
+panel and no service yet. `list`, `info` and `assets` work too.
+
+1. Build `opal-rs.exe`, on Windows with `cargo build --release -p opal-rs`, or from Linux with the MinGW linker
+   (`sudo apt install gcc-mingw-w64-x86-64`):
+   ```shell
+   rustup target add x86_64-pc-windows-gnu
+   cargo build --release -p opal-rs --target x86_64-pc-windows-gnu
+   ```
+2. Put `opal-rs.exe` in a folder with an `assets` folder next to it, put the disk image in `assets`, and run
+   `opal-rs assets extract`. (Or point `OPAL_RS_ASSETS` at a folder holding the camera files.)
+3. The camera's data link (interface 0) needs the WinUSB driver. If `opal-rs list` shows no camera, install WinUSB
+   for interface 0 with [Zadig](https://zadig.akeo.ie/) (Options > List All Devices). The camera shows up under
+   more than one USB id while it boots, so this may be needed for each. Leave the video and audio interfaces alone.
+4. Run `opal-rs webcam` and pick "Opal C1" in your app.
 
 ## Tests
 ```shell

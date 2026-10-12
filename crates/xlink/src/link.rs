@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -91,6 +91,8 @@ struct Shared {
     last_heard: AtomicU64,
     /// The last packet headers each way, for working out why a device went quiet.
     trace: Mutex<VecDeque<String>>,
+    /// Set while this side is ending the session, when silence is expected.
+    ending: AtomicBool,
 }
 
 const TRACE_LEN: usize = 16;
@@ -205,6 +207,7 @@ impl Link {
             started: Instant::now(),
             last_heard: AtomicU64::new(0),
             trace: Mutex::new(VecDeque::new()),
+            ending: AtomicBool::new(false),
         });
         let s = shared.clone();
         thread::Builder::new()
@@ -351,6 +354,11 @@ impl Link {
         self.shared.started.elapsed().saturating_sub(heard)
     }
 
+    /// Tells the link the session is ending, so the device going quiet is not reported.
+    pub fn ending(&self) {
+        self.shared.ending.store(true, Ordering::Relaxed);
+    }
+
     /// Ends the link from this side, for a device that stopped answering. Everything waiting on it returns.
     pub fn close(&self, why: &str) {
         let mut st = self.shared.state.lock().unwrap();
@@ -450,6 +458,9 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
                 if shared.state.lock().unwrap().closed.is_some() {
                     break "closed".into();
+                }
+                if shared.ending.load(Ordering::Relaxed) {
+                    continue;
                 }
                 // A device that goes quiet may be stuck sending to us: queue fresh reads, then clear the pipe.
                 quiet += 1;

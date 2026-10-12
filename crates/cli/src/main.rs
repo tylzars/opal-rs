@@ -1,10 +1,15 @@
+#[cfg(unix)]
 mod daemon;
 mod mains;
+#[cfg(unix)]
 mod settings;
+#[cfg(unix)]
 mod stickers;
+mod webcam;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -37,7 +42,14 @@ enum Command {
     Boot,
     /// Boot and print device information
     Info,
+    /// Boot in low power mode and keep the camera's own 1080p USB video on until Ctrl-C (no effects)
+    Webcam {
+        /// Light flicker: off, 50, 60 or auto (by time zone)
+        #[arg(long, default_value = "auto")]
+        flicker: String,
+    },
     /// Boot and keep the camera running, controlled with `ctl`
+    #[cfg(unix)]
     Run {
         /// v4l2loopback device to write video to
         #[arg(long)]
@@ -53,6 +65,7 @@ enum Command {
         settings: Option<PathBuf>,
     },
     /// Send a command to a running camera, e.g. `ctl status` or `ctl focus 120`
+    #[cfg(unix)]
     Ctl {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -70,9 +83,36 @@ enum AssetsCommand {
     Verify,
 }
 
+/// Camera files: `OPAL_RS_ASSETS`, else `assets/` in the source tree this was built from, else `assets/` next to
+/// the program (as in a release).
 fn asset_dir() -> PathBuf {
-    let dir = Path::new(ASSET_DIR);
-    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    if let Some(dir) = std::env::var_os("OPAL_RS_ASSETS") {
+        return dir.into();
+    }
+    let built = Path::new(ASSET_DIR);
+    if built.is_dir() {
+        return built.canonicalize().unwrap_or_else(|_| built.to_path_buf());
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.canonicalize().ok()?.parent()?.join("assets")))
+        .unwrap_or_else(|| "assets".into())
+}
+
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// Stops on Ctrl-C (and on Unix also on SIGTERM).
+fn on_stop() -> Result<()> {
+    ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("stop handler")
+}
+
+/// True once a stop was asked for.
+fn stopped() -> bool {
+    #[cfg(unix)]
+    if daemon::stopped() {
+        return true;
+    }
+    STOP.load(Ordering::Relaxed)
 }
 
 fn firmware_asset() -> &'static Asset {
@@ -88,7 +128,7 @@ fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
         if let Some(d) = opal_xlink::list()?.into_iter().next() {
             return Ok(Some(d));
         }
-        if start.elapsed() > timeout || daemon::stopped() {
+        if start.elapsed() > timeout || stopped() {
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -103,10 +143,13 @@ fn boot_stamp() -> PathBuf {
 }
 
 /// Restarts after the camera goes away are limited, so a camera that keeps failing is left alone.
+#[cfg(unix)]
 const MAX_RESTARTS: usize = 3;
+#[cfg(unix)]
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
 
 /// Sleeps for `d`, or less if the service is told to stop.
+#[cfg(unix)]
 fn sleep_unless_stopped(d: Duration) {
     let end = Instant::now() + d;
     while !daemon::stopped() && Instant::now() < end {
@@ -115,6 +158,7 @@ fn sleep_unless_stopped(d: Duration) {
 }
 
 /// Time left before another boot is allowed.
+#[cfg(unix)]
 fn boot_wait() -> Duration {
     std::fs::metadata(boot_stamp())
         .and_then(|m| m.modified())
@@ -123,6 +167,7 @@ fn boot_wait() -> Duration {
         .map_or(Duration::ZERO, |since| MIN_BOOT_INTERVAL.saturating_sub(since))
 }
 
+#[cfg(unix)]
 fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings, overrides: &[String]) -> Result<()> {
     let low_power = settings.low_power();
     let booted = boot(dir, low_power)?;
@@ -152,6 +197,7 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     )
 }
 
+#[cfg(unix)]
 fn device_info(dev: &Device) -> daemon::DeviceInfo {
     use opal_dai::msgpack::Value;
     let serial = match dev.call("getMxId", vec![]) {
@@ -265,6 +311,11 @@ fn main() -> Result<ExitCode> {
             dev.close();
             Ok(ExitCode::SUCCESS)
         }
+        Command::Webcam { flicker } => {
+            webcam::run(&dir, &flicker)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        #[cfg(unix)]
         Command::Run {
             output,
             blur,
@@ -313,6 +364,7 @@ fn main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
         Command::Ctl { command } => Ok(if daemon::send(&command)? {
             ExitCode::SUCCESS
         } else {
