@@ -36,6 +36,7 @@ fn group(command: &str) -> Option<&'static str> {
         "saturation" => "saturation",
         "sharpness" => "sharpness",
         "gain" => "gain",
+        "mic" => "mic",
         "blur" => "blur",
         "lut" => "lut",
         "background" => "background",

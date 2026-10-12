@@ -43,6 +43,7 @@
    opal-rs ctl exposure 10000 400
    opal-rs ctl ae
    opal-rs ctl gain 20        # microphone gain in dB
+   opal-rs ctl mic off        # mute the microphone; mic on turns it back on
    opal-rs ctl blur 24        # blur the background, radius in pixels; blur 0 turns it off
    opal-rs ctl background ~/Pictures/beach.jpg   # show a picture behind you instead; background off removes it
    opal-rs ctl lut noir 0.8   # colour look at 80%: mono, noir, tonal, fade, chrome, instant, process, transfer, warm or cool
@@ -54,7 +55,7 @@
    opal-rs ctl power low      # low power mode, see below; power normal goes back; restarts the camera
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.
-   Focus, exposure, white balance, image adjustments, microphone gain, blur, background, colour look, framing,
+   Focus, exposure, white balance, image adjustments, microphone gain and mute, blur, background, colour look, framing,
    gestures, resolution and low power mode are saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
 
    In low power mode the camera sends 1080p video straight to your apps like an ordinary webcam, so your computer

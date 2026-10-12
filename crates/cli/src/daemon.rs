@@ -193,6 +193,8 @@ struct Session {
     look: Mutex<Option<Look>>,
     zoom: Mutex<Zoom>,
     hands: Mutex<Hands>,
+    /// Microphone on, and its gain in dB.
+    mic_state: Mutex<(bool, f32)>,
     /// Set by the peace gesture: black frames instead of video.
     video_off: AtomicBool,
     settings: Mutex<Settings>,
@@ -311,7 +313,7 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} video {}",
+                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} mic {} video {}",
                     format!("{:?}", st.mode).to_lowercase(),
                     if self.low_power { "low" } else { "normal" },
                     self.resolution.name(),
@@ -339,6 +341,7 @@ impl Session {
                             ),
                         }
                     },
+                    if self.mic_state.lock().unwrap().0 { "on" } else { "off" },
                     if self.video_off.load(Ordering::Relaxed) {
                         "off"
                     } else {
@@ -466,7 +469,22 @@ impl Session {
             ["snap", path] => self.snap(Path::new(path)).map(|_| String::new()),
             ["gain", db] => {
                 let db: f32 = db.parse()?;
-                self.link.write(self.mic, &AudioInConfig::gain_db(db).to_packet())?;
+                let mut mic = self.mic_state.lock().unwrap();
+                if mic.0 {
+                    self.link.write(self.mic, &AudioInConfig::gain_db(db).to_packet())?;
+                }
+                mic.1 = db;
+                Ok(String::new())
+            }
+            ["mic", on @ ("on" | "off")] => {
+                let mut mic = self.mic_state.lock().unwrap();
+                mic.0 = *on == "on";
+                let config = if mic.0 {
+                    AudioInConfig::gain_db(mic.1)
+                } else {
+                    AudioInConfig::muted()
+                };
+                self.link.write(self.mic, &config.to_packet())?;
                 Ok(String::new())
             }
             ["led", color] => {
@@ -677,6 +695,7 @@ pub fn run(
             last: None,
             gestures: Gestures::default(),
         }),
+        mic_state: Mutex::new((true, 0.0)),
         video_off: AtomicBool::new(false),
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),

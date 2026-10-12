@@ -413,6 +413,13 @@ impl AudioInConfig {
         c
     }
 
+    /// No sound from the microphone.
+    pub fn muted() -> Self {
+        let mut c = Self::default();
+        c.config.mic_gain = 0.0;
+        c
+    }
+
     pub fn to_packet(&self) -> Vec<u8> {
         packet(&[], AUDIO_IN_CONFIG, &nop::to_vec(self))
     }
