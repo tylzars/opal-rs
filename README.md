@@ -21,6 +21,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off.
 - Low power mode: the camera works as an ordinary webcam with no effects, so your computer does less work.
 - On a USB 2 port the video drops to 720p, as the official app does.
+- A tray icon shows when the camera is on and turns the video on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.

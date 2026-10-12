@@ -68,6 +68,14 @@
    cargo install --path crates/gui
    opal-rs-gui
    ```
+5. For an icon in the top bar that shows when the camera is on and turns the video on and off:
+   ```shell
+   cargo install --path crates/tray
+   mkdir -p ~/.config/autostart
+   cp dist/opal-rs-tray.desktop ~/.config/autostart/
+   opal-rs-tray &
+   ```
+   GNOME shows it through its AppIndicator extension, which Ubuntu turns on by default.
 
 Starting the service reboots the camera, which drops it off USB for a few seconds. `opal-rs` refuses to boot it again
 within a minute.

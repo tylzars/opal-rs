@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Opal C1 tray icon
+Exec=opal-rs-tray
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

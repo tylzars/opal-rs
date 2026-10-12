@@ -1,0 +1,13 @@
+[package]
+name = "opal-tray"
+description = "Tray icon for the opal-rs camera service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opal-rs-tray"
+path = "src/main.rs"
+
+[dependencies]
+ksni = { version = "0.3.6", features = ["blocking"] }
