@@ -86,7 +86,7 @@ fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
         if let Some(d) = opal_xlink::list()?.into_iter().next() {
             return Ok(Some(d));
         }
-        if start.elapsed() > timeout {
+        if start.elapsed() > timeout || daemon::stopped() {
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -103,6 +103,14 @@ fn boot_stamp() -> PathBuf {
 /// Restarts after the camera goes away are limited, so a camera that keeps failing is left alone.
 const MAX_RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
+
+/// Sleeps for `d`, or less if the service is told to stop.
+fn sleep_unless_stopped(d: Duration) {
+    let end = Instant::now() + d;
+    while !daemon::stopped() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(250).min(end - Instant::now()));
+    }
+}
 
 /// Time left before another boot is allowed.
 fn boot_wait() -> Duration {
@@ -244,8 +252,10 @@ fn main() -> Result<ExitCode> {
                 };
                 let result = run_session(&dir, output.clone(), settings, &overrides);
                 if daemon::take_restart() && result.is_ok() {
-                    std::thread::sleep(boot_wait());
-                    continue;
+                    sleep_unless_stopped(boot_wait());
+                    if !daemon::stopped() {
+                        continue;
+                    }
                 }
                 if daemon::stopped() {
                     result?;
@@ -259,7 +269,10 @@ fn main() -> Result<ExitCode> {
                 restarts.push(Instant::now());
                 eprintln!("{err:#}; waiting for the camera");
                 wait_for_camera(Duration::MAX)?;
-                std::thread::sleep(boot_wait());
+                sleep_unless_stopped(boot_wait());
+                if daemon::stopped() {
+                    break;
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
