@@ -69,6 +69,10 @@ impl Setup {
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
+        egui::Frame::new().inner_margin(16).show(ui, |ui| self.contents(ui));
+    }
+
+    fn contents(&mut self, ui: &mut Ui) {
         let phase = self.phase.lock().unwrap().clone();
         ui.add_space(24.0);
         ui.vertical_centered(|ui| ui.heading("Set up Opal C1"));
@@ -216,7 +220,9 @@ fn open_page() {
         std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
         c.spawn()
     };
-    if let Err(e) = r {
-        eprintln!("{OPAL_PAGE}: {e}");
+    match r {
+        // Collected when it exits, so it does not linger as a zombie.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => eprintln!("{OPAL_PAGE}: {e}"),
     }
 }

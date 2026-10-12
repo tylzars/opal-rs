@@ -502,6 +502,8 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
         ("Not connected", RED)
     } else if video_off {
         ("Video off", AMBER)
+    } else if matches!(app.status_value("loop"), Some("playing" | "bounce")) {
+        ("Loop", AMBER)
     } else if app.status_value("streaming") == Some("true") {
         ("Live", GREEN)
     } else {

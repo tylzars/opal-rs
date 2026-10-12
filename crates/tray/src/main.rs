@@ -88,8 +88,10 @@ fn dot(size: usize, colour: [u8; 3]) -> Vec<(u8, [u8; 3])> {
 
 /// Starts the control panel.
 fn open_panel() {
-    if let Err(e) = std::process::Command::new(opal_ipc::program("opal-rs-gui")).spawn() {
-        eprintln!("opal-rs-gui: {e}");
+    match std::process::Command::new(opal_ipc::program("opal-rs-gui")).spawn() {
+        // Collected when it closes, so it does not linger as a zombie.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => eprintln!("opal-rs-gui: {e}"),
     }
 }
 
@@ -191,7 +193,11 @@ impl Tray {
         } else if !self.streaming() {
             "Camera idle".into()
         } else if self.video_off() {
-            "Video off, watching for gestures".into()
+            if value(&self.status, "gestures") == Some("on") {
+                "Video off, watching for gestures".into()
+            } else {
+                "Video off".into()
+            }
         } else {
             let apps: Vec<&str> = value(&self.status, "apps")
                 .unwrap_or("-")

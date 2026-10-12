@@ -39,6 +39,8 @@ pub(crate) fn send(command: &str) -> Result<String, String> {
     })?;
     match reply.strip_prefix("error: ") {
         Some(e) => Err(e.to_owned()),
+        // A bare "ok" means done with nothing to say, as for an empty preset list.
+        None if reply == "ok" => Ok(String::new()),
         None => Ok(reply),
     }
 }
