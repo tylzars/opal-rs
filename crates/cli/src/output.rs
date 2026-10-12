@@ -1,5 +1,4 @@
-//! Where the processed video goes, and who is watching it: v4l2loopback devices on Linux (the main camera and any
-//! extra ones, see `cameras`), the "Opal C1 Virtual" camera on Windows.
+//! Where the video goes and who watches it: v4l2loopback on Linux, "Opal C1 Virtual" on Windows.
 
 use std::path::PathBuf;
 

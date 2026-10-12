@@ -1,6 +1,4 @@
-//! Myriad X bootloader client: version queries and booting an image from RAM.
-//!
-//! Requests that write flash or bootloader configuration are deliberately not implemented.
+//! Myriad X bootloader client: version queries and RAM boot only, never flash or bootloader config.
 
 use std::thread;
 use std::time::Duration;

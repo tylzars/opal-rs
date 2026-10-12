@@ -249,17 +249,6 @@ impl CameraControl {
         self.set(cmd::AF_TRIGGER)
     }
 
-    pub fn auto_focus_region(&mut self, x: u16, y: u16, width: u16, height: u16) -> &mut Self {
-        self.af_region = Region {
-            x,
-            y,
-            width,
-            height,
-            priority: 1,
-        };
-        self.set(cmd::AF_REGION)
-    }
-
     pub fn auto_focus_lens_range(&mut self, infinity: u8, macro_: u8) -> &mut Self {
         self.lens_pos_auto_infinity = infinity;
         self.lens_pos_auto_macro = macro_;
@@ -285,25 +274,9 @@ impl CameraControl {
         self.set(cmd::AE_MANUAL)
     }
 
-    pub fn auto_exposure_region(&mut self, x: u16, y: u16, width: u16, height: u16) -> &mut Self {
-        self.ae_region = Region {
-            x,
-            y,
-            width,
-            height,
-            priority: 1,
-        };
-        self.set(cmd::AE_REGION)
-    }
-
     pub fn exposure_compensation(&mut self, ev: i8) -> &mut Self {
         self.exp_compensation = ev;
         self.set(cmd::EXPOSURE_COMPENSATION)
-    }
-
-    pub fn auto_exposure_lock(&mut self, lock: bool) -> &mut Self {
-        self.ae_lock_mode = lock;
-        self.set(cmd::AE_LOCK)
     }
 
     pub fn anti_banding(&mut self, mode: u8) -> &mut Self {
@@ -314,11 +287,6 @@ impl CameraControl {
     pub fn auto_white_balance(&mut self, mode: u8) -> &mut Self {
         self.awb_mode = mode;
         self.set(cmd::AWB_MODE)
-    }
-
-    pub fn auto_white_balance_lock(&mut self, lock: bool) -> &mut Self {
-        self.awb_lock_mode = lock;
-        self.set(cmd::AWB_LOCK)
     }
 
     pub fn white_balance(&mut self, kelvin: u16) -> &mut Self {
@@ -354,16 +322,6 @@ impl CameraControl {
     pub fn sharpness(&mut self, v: u8) -> &mut Self {
         self.sharpness = v;
         self.set(cmd::SHARPNESS)
-    }
-
-    pub fn luma_denoise(&mut self, v: u8) -> &mut Self {
-        self.luma_denoise = v;
-        self.set(cmd::LUMA_DENOISE)
-    }
-
-    pub fn chroma_denoise(&mut self, v: u8) -> &mut Self {
-        self.chroma_denoise = v;
-        self.set(cmd::CHROMA_DENOISE)
     }
 
     pub fn to_packet(&self) -> Vec<u8> {

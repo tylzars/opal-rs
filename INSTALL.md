@@ -37,10 +37,13 @@ apply` or the next restart. There can be four extra cameras, named with letters,
 They are kept in `/etc/modprobe.d/opal-rs-v4l2loopback.conf`, which uninstalling removes. Windows shares a camera
 between apps itself, so there is one camera there.
 
-### Windows 11 (not yet tried on a real machine)
+### Windows
 Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the
 "Opal C1 Virtual" camera, starts the tray icon when you sign in, adds "Opal C1 Control" to the Start menu and offers
 to start it right away. To remove it, see [Uninstalling](#uninstalling).
+
+"Opal C1 Virtual" and its effects need Windows 11. On Windows 10 the camera runs in low power mode: pick "Opal C1"
+in your apps.
 
 ## Uninstalling
 ```shell
@@ -51,8 +54,8 @@ settings, presets, stickers and the camera files (`--keep-data` keeps them), and
 files. With an administrator password prompt it removes the package, or the system files a source install copied in
 (only exact copies of the ones from `dist/`). `--dry-run` only lists it all.
 
-- `sudo apt purge opal-rs` alone removes the programs and system files (`apt remove` leaves the tray's autostart
-  file) but keeps your settings and camera files in `~/.config/opal-rs` and `~/.local/share/opal-rs`. v4l2loopback stays loaded until you restart, and
+- `sudo apt purge opal-rs` alone removes the programs and system files but keeps your settings and camera files in
+  `~/.config/opal-rs` and `~/.local/share/opal-rs`. v4l2loopback stays loaded until you restart, and
   `sudo apt autoremove` removes `v4l2loopback-dkms` if nothing else uses it.
 - On Windows, Settings > Apps > Installed apps > Opal C1 (opal-rs) > Uninstall does the same and asks whether to
   delete your settings and camera files too.
@@ -163,7 +166,7 @@ Starting the service reboots the camera, which drops it off USB for a few second
 within a minute.
 
 ## Building on Windows
-Windows 11 is needed: the virtual camera uses Windows 11's virtual camera support. Everything from Linux is there:
+The virtual camera needs Windows 11; Windows 10 gets low power mode only. Everything from Linux is there:
 the "Opal C1 Virtual" camera with effects, `ctl`, the control panel and the tray icon. Low power mode streams for as
 long as the service runs, as Windows does not say which apps use the camera's own video, and the control panel has
 no preview then.
@@ -199,27 +202,18 @@ video and audio interfaces alone.
 To remove the virtual camera, run `regsvr32 /u opal_vcam.dll` as administrator.
 
 ## Building the packages
-Both leave out the source tree's `assets/` folder (`OPAL_RS_PACKAGED=1`), so installed copies keep the camera files
-in the user's data folder. Nothing from Opal goes into either.
-
-The Linux package, with [cargo-deb](https://crates.io/crates/cargo-deb) (`cargo install cargo-deb`), written to
-`target/debian/`:
 ```shell
-OPAL_RS_PACKAGED=1 cargo build --release -p opal-rs -p opal-gui -p opal-tray
-OPAL_RS_PACKAGED=1 cargo deb -p opal-rs --no-build
+cargo xtask deb     # Ubuntu/Debian package
+cargo xtask exe     # Windows installer
+cargo xtask all     # both
 ```
-Its install script loads v4l2loopback, applies the USB rule and enables the service for every user.
+Both are written to `target/dist`. They leave out the source tree's `assets/` folder, so installed copies keep the
+camera files in the user's data folder. Nothing from Opal goes into either.
 
-The Windows installer, with the four programs built in (MinGW as above; `strip` keeps it smaller):
-```shell
-T=target/x86_64-pc-windows-gnu/release
-OPAL_RS_PACKAGED=1 cargo build --release --target x86_64-pc-windows-gnu -p opal-rs -p opal-gui -p opal-tray -p opal-vcam
-mkdir -p target/payload
-for f in opal-rs.exe opal-rs-gui.exe opal-rs-tray.exe opal_vcam.dll; do x86_64-w64-mingw32-strip -o target/payload/$f $T/$f; done
-OPAL_RS_PAYLOAD=$PWD/target/payload cargo build --release --target x86_64-pc-windows-gnu -p opal-setup --features payload
-```
-The installer is `$T/opal-rs-setup.exe`. Without `--features payload` it installs the four files from its own folder
-instead.
+- The package needs [cargo-deb](https://crates.io/crates/cargo-deb) (`cargo install cargo-deb`) and is built on
+  Linux. Its install script loads v4l2loopback, applies the USB rule and enables the service for every user.
+- The installer needs the Windows target (`rustup target add x86_64-pc-windows-gnu`) and, from Linux, the MinGW
+  linker (`sudo apt install gcc-mingw-w64-x86-64`). It has the four programs built in.
 
 ## Tests
 ```shell

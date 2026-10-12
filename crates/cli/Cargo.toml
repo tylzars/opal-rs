@@ -22,9 +22,8 @@ Composer disk image, which the control panel asks for on first run."""
 section = "video"
 priority = "optional"
 depends = "$auto, systemd, udev, kmod"
-recommends = "zenity"
-# Ubuntu 24.04's kernels (6.8 and the 7.0 HWE kernel) carry v4l2loopback, signed; the DKMS build would replace it
-# with an older, unsigned one.
+recommends = "zenity, pkexec"
+# Ubuntu's own kernels carry a signed v4l2loopback; the DKMS one would replace it with an unsigned build.
 suggests = "v4l2loopback-dkms"
 maintainer-scripts = "../../dist/deb/"
 assets = [

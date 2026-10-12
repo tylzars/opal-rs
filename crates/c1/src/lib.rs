@@ -142,7 +142,7 @@ while True:
         GPIO.write(pin, 1 if value else 0)
 "#;
 
-/// Status LED states used by Opal Composer.
+/// Status LED states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Led {
     Off,

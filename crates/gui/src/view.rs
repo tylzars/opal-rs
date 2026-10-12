@@ -230,7 +230,7 @@ pub fn file_dialog(title: &str, kind: &str, extensions: &[&str]) -> Command {
         let mut c = Command::new("powershell");
         c.args(["-NoProfile", "-STA", "-Command", &script]);
         // No console window flashing up.
-        std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+        std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
         c
     };
     command
@@ -613,7 +613,7 @@ fn message(app: &mut App, ui: &mut Ui) {
         });
 }
 
-/// Every setting in one list, grouped like the camera's own app: camera, audio, effects, manual, settings.
+/// Every setting in one list: camera, audio, effects, manual, settings.
 fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     let app_loop = app.status_value("loop").unwrap_or("off").to_owned();
     ui.spacing_mut().item_spacing.y = 10.0;

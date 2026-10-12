@@ -174,11 +174,12 @@ impl Controls {
                 ["blur", "on"] => c.blur = true,
                 ["blur", _] => (c.blur, c.blur_radius) = (true, int(1).unwrap_or(c.blur_radius)),
                 ["background", "off"] => c.background_on = false,
-                ["background", path] => (c.background, c.background_on) = ((*path).to_owned(), true),
-                ["lut", path, rest @ ..] => {
-                    c.look = (*path).to_owned();
+                ["background", _, ..] => (c.background, c.background_on) = (opal_ipc::tail(cmd, 1).to_owned(), true),
+                ["lut", _, ..] => {
+                    let (path, amount) = opal_ipc::split_amount(opal_ipc::tail(cmd, 1));
+                    c.look = path.to_owned();
                     c.look_on = true;
-                    c.look_amount = rest.first().and_then(|a| a.parse().ok()).unwrap_or(1.0);
+                    c.look_amount = amount.unwrap_or(1.0);
                 }
                 ["zoom", "off"] => c.zoom = false,
                 ["zoom", "on"] => c.zoom = true,

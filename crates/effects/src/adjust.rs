@@ -1,5 +1,4 @@
-//! Colour adjustments (temperature, tint, shadows, highlights, vibrance, per-colour hue, saturation and
-//! lightness), baked into a 3D table together with a look.
+//! Colour adjustments, baked into a 3D table together with a look.
 
 use crate::looks::{luma, saturate};
 use crate::lut::Cube;

@@ -1,8 +1,4 @@
-//! The Windows virtual camera "Opal C1 Virtual".
-//!
-//! Windows' Frame Server loads this crate's DLL as a Media Foundation media source when an app opens the camera.
-//! The source creates a shared frame buffer ([`shared`]) and marks it while an app streams; the opal-rs service
-//! ([`host`]) registers the camera for its session, watches that mark and writes the processed frames in.
+//! The Windows virtual camera "Opal C1 Virtual": a Media Foundation source fed by the service.
 
 pub mod shared;
 

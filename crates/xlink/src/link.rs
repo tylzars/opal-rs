@@ -349,11 +349,6 @@ impl Link {
         Ok(packet)
     }
 
-    /// The last packets each way and how full each stream is, for diagnosis.
-    pub fn trace(&self) -> String {
-        dump(&self.shared)
-    }
-
     /// Time since the device last sent anything.
     pub fn quiet_for(&self) -> Duration {
         let heard = Duration::from_millis(self.shared.last_heard.load(Ordering::Relaxed));

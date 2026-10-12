@@ -1,7 +1,4 @@
-//! `opal-rs uninstall`: removes opal-rs and what it made, after listing it all and asking.
-//!
-//! The camera itself needs nothing: opal-rs never writes to its flash, and unplugging it returns it to its own
-//! firmware.
+//! `opal-rs uninstall`: lists what opal-rs made, asks, then removes it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,7 +161,7 @@ fn stop() {
     for name in ["opal-rs-tray.exe", "opal-rs-gui.exe"] {
         let mut c = Command::new("taskkill");
         c.args(["/F", "/IM", name]);
-        std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+        std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
         let _ = c.output();
     }
 }

@@ -1,9 +1,4 @@
-//! Virtual cameras (Linux): "Opal C1 Virtual" plus extra ones the user adds and names. Linux lets one app use a
-//! camera at a time, so each app that should see the Opal C1 at the same time needs a camera of its own.
-//!
-//! They are v4l2loopback devices made from its module options. Extra ones go in an override of the package's
-//! options file, which only an administrator can write; the change applies when the module is next loaded, at once
-//! if no camera is open.
+//! Virtual cameras on Linux: "Opal C1 Virtual" plus named extras, one per app, as v4l2loopback devices.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

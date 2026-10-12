@@ -127,28 +127,6 @@ impl<R: Read + Seek> Volume<R> {
         Err(Error::NotFound(path.to_owned()))
     }
 
-    /// Names in a folder, sorted. Folder names end in `/`. `path` is relative to the root folder.
-    pub fn list(&self, path: &str) -> Result<Vec<String>, Error> {
-        let mut id = ROOT_FOLDER_ID;
-        for name in path.split('/').filter(|c| !c.is_empty()) {
-            match self.lookup(id, name) {
-                Some(Entry::Folder { id: child }) => id = child,
-                _ => return Err(Error::NotFound(path.to_owned())),
-            }
-        }
-        let mut names: Vec<String> = self
-            .catalog
-            .iter()
-            .filter(|((parent, _), _)| *parent == id)
-            .map(|((_, name), entry)| match entry {
-                Entry::Folder { .. } => format!("{name}/"),
-                Entry::File(_) => name.clone(),
-            })
-            .collect();
-        names.sort();
-        Ok(names)
-    }
-
     fn lookup(&self, parent: u32, name: &str) -> Option<Entry> {
         let key = (parent, name.nfd().collect::<String>());
         self.catalog.get(&key).cloned()

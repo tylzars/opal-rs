@@ -29,20 +29,20 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off; each
   can be switched off on its own.
 - Low power mode: the camera works as an ordinary webcam with no effects, so your computer does less work.
-- On a USB 2 port the video drops to 720p, as the official app does.
+- On a USB 2 port the video drops to 720p.
 - Zebra stripes and a histogram in the control panel's preview.
 - Presets: save a look with its lighting and effects under a name and switch between them.
 - Shows a camera-off picture while your video is off, and turns the camera off while the screen is locked.
 - A tray icon shows when the camera is on and turns the video on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
 - `opal-rs webcam` runs the camera as an ordinary webcam with no service.
-- Windows 11: the same, with a Windows virtual camera, control panel and tray icon (not yet tried on a real
-  machine; see [INSTALL.md](INSTALL.md)).
+- Windows 11: the same, with a Windows virtual camera, control panel and tray icon. Windows 10 runs in low power
+  mode only, as it has no virtual cameras.
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
 
 ## Documentation
-- [INSTALL.md](INSTALL.md): installing (a .deb on Ubuntu and Debian, an installer on Windows 11) or building from source
+- [INSTALL.md](INSTALL.md): installing (a .deb on Ubuntu and Debian, an installer on Windows) or building from source
 - [docs/c1-protocol.md](docs/c1-protocol.md): notes on the camera's USB interface
 
 Opal and Opal C1 are the property of Opal Camera Inc. This project is not affiliated with or endorsed by Opal Camera

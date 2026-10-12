@@ -1,4 +1,4 @@
-//! Long-running camera session controlled over a Unix socket.
+//! The camera service, controlled over the control channel.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -113,7 +113,6 @@ struct Blur {
     background: Option<(String, Arc<Vec<u8>>)>,
     mask: Option<Mask>,
     masks: u64,
-    layout: String,
 }
 
 /// A picture, scaled and cropped to cover a `width` x `height` frame, as full-range BT.601 NV12.
@@ -750,13 +749,9 @@ impl Session {
                 self.rebuild_colour();
                 Ok(String::new())
             }
-            ["lut", path, rest @ ..] => {
-                let amount = match rest {
-                    [] => 1.0,
-                    [a] => a.parse()?,
-                    _ => bail!("usage: lut <look or file.cube> [amount]"),
-                };
-                *self.look.lock().unwrap() = Some(load_look(path, amount)?);
+            ["lut", _, ..] => {
+                let (path, amount) = opal_ipc::split_amount(opal_ipc::tail(line, 1));
+                *self.look.lock().unwrap() = Some(load_look(path, amount.unwrap_or(1.0))?);
                 self.rebuild_colour();
                 Ok(String::new())
             }
@@ -793,7 +788,8 @@ impl Session {
                 self.sync_branches()?;
                 Ok(String::new())
             }
-            ["background", path] => {
+            ["background", _, ..] => {
+                let path = opal_ipc::tail(line, 1);
                 let (w, h) = self.resolution.size();
                 let image = load_background(Path::new(path), w, h)?;
                 let name = Path::new(path)
@@ -1312,14 +1308,6 @@ pub fn run(
                 };
                 let mut blur = session.blur.lock().unwrap();
                 blur.masks += 1;
-                if blur.layout.is_empty() {
-                    blur.layout = nn
-                        .tensors
-                        .iter()
-                        .map(|t| format!("{} {:?} order {:#x} type {}", t.name, t.dims, t.order, t.data_type))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                }
                 let Some(next) = nn
                     .tensor_f32(data, "segment")
                     .and_then(|scores| Mask::from_scores(&scores, w, h))
@@ -1562,7 +1550,10 @@ pub fn run(
                     }
                 }
                 Ok(None) => std::thread::sleep(ACCEPT_POLL),
-                Err(e) => result = Err(e.into()),
+                Err(e) => {
+                    eprintln!("control: {e}");
+                    std::thread::sleep(ACCEPT_POLL);
+                }
             }
         }
         if result.is_err() {

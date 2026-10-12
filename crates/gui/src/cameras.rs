@@ -1,6 +1,4 @@
-//! The Virtual cameras card (Linux): Opal C1 Virtual and extra cameras, one for each app that should use the
-//! Opal C1 at the same time. Adding or removing one runs `opal-rs cameras`, which asks for the administrator
-//! password.
+//! The Virtual cameras card on Linux: add and remove extra cameras through `opal-rs cameras`.
 
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};

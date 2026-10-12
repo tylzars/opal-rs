@@ -1,7 +1,4 @@
-//! The frame buffer shared between the service and the media source: a header, then one NV12 frame.
-//!
-//! The service writes frames under a sequence count, odd while it writes, so the source never shows half a frame.
-//! The source sets `streaming` while an app takes frames, which is how the service knows to run the camera.
+//! Frame buffer shared by the service and the media source: a header, then one NV12 frame.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

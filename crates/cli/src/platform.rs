@@ -1,5 +1,4 @@
-//! What differs between Linux and Windows apart from the camera link: the settings folder, the local time and
-//! whether the screen is locked.
+//! Linux and Windows differences: settings folder, local time, screen lock.
 
 use std::path::PathBuf;
 

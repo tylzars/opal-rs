@@ -1,5 +1,4 @@
-//! First run: the camera's files come out of the user's own copy of Opal Composer. This screen sends them to Opal's
-//! download page and lets them pick the downloaded disk image, which `opal-rs assets extract` then unpacks.
+//! First run: opens Opal's download page and extracts the camera files from the disk image the user picks.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -37,7 +36,7 @@ fn tool(args: &[&str]) -> Command {
     let mut c = Command::new(opal_ipc::program("opal-rs"));
     c.args(args);
     #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
     c
 }
 
@@ -217,7 +216,7 @@ fn open_page() {
     let r = {
         let mut c = Command::new("cmd");
         c.args(["/c", "start", "", OPAL_PAGE]);
-        std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+        std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
         c.spawn()
     };
     match r {

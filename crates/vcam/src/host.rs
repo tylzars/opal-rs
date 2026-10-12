@@ -1,5 +1,4 @@
-//! The service's side: puts "Opal C1 Virtual" on the system for as long as the service runs, and writes frames to
-//! the source's shared buffer while an app has the camera open.
+//! The service side: registers "Opal C1 Virtual" and writes frames while an app streams.
 
 use std::time::{Duration, Instant};
 

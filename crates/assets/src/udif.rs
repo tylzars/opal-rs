@@ -73,10 +73,6 @@ impl UdifImage {
         })
     }
 
-    pub fn partition_names(&self) -> impl Iterator<Item = &str> {
-        self.partitions.iter().map(|p| p.name.as_str())
-    }
-
     pub fn open_partition(&self, pattern: &str) -> Result<Partition, Error> {
         let table = self
             .partitions
@@ -174,10 +170,6 @@ pub struct Partition {
 }
 
 impl Partition {
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
     fn chunk_index(&self, pos: u64) -> Option<usize> {
         let sector = pos / SECTOR;
         let i = self.chunks.partition_point(|c| c.sector + c.sectors <= sector);

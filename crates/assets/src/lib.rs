@@ -22,14 +22,8 @@ pub enum Error {
     Format(String),
     #[error("{0} not found in disk image")]
     NotFound(String),
-    #[error("{name}: checksum mismatch")]
-    Mismatch {
-        name: String,
-        expected: &'static str,
-        expected_size: u64,
-        actual: String,
-        actual_size: u64,
-    },
+    #[error("{0}: checksum mismatch")]
+    Mismatch(String),
 }
 
 pub enum Event<'a> {
@@ -104,13 +98,7 @@ pub fn load(dir: &Path, asset: &Asset) -> Result<Vec<u8>, Error> {
 fn check(asset: &Asset, bytes: &[u8]) -> Result<(), Error> {
     let actual = hex(&Sha256::digest(bytes));
     if bytes.len() as u64 != asset.size || actual != asset.sha256 {
-        return Err(Error::Mismatch {
-            name: asset.file_name.to_owned(),
-            expected: asset.sha256,
-            expected_size: asset.size,
-            actual,
-            actual_size: bytes.len() as u64,
-        });
+        return Err(Error::Mismatch(asset.file_name.to_owned()));
     }
     Ok(())
 }

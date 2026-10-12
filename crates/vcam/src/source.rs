@@ -1,5 +1,4 @@
-//! The media source Frame Server loads for "Opal C1 Virtual": one live NV12 video stream, fed from the shared frame
-//! buffer the service writes to.
+//! The media source Frame Server loads: one live NV12 stream read from the shared buffer.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

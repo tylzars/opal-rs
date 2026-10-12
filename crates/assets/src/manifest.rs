@@ -4,14 +4,12 @@ pub struct Release {
     pub label: &'static str,
     pub dmg_name: &'static str,
     pub dmg_sha256: &'static str,
-    pub dmg_size: u64,
 }
 
 pub const RELEASES: &[Release] = &[Release {
     label: "Opal Composer 2.0 (build 24)",
     dmg_name: "Opal_Composer_2.0.0_24.dmg",
     dmg_sha256: "4eaa1225a203b057dbabaa7b17d7bbff91512cac32e942359b651dbef06928b3",
-    dmg_size: 156_208_242,
 }];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

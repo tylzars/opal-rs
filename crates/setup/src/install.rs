@@ -128,7 +128,7 @@ fn install() -> Result<(), String> {
         std::fs::copy(&source, dir.join(SETUP)).map_err(|e| format!("Cannot copy the installer: {e}"))?;
     }
     let dll = dir.join("opal_vcam.dll");
-    let code = Command::new("regsvr32")
+    let code = Command::new(windows_program("System32\\regsvr32.exe"))
         .arg("/s")
         .arg(&dll)
         .status()
@@ -177,7 +177,9 @@ fn install() -> Result<(), String> {
     if start {
         // Explorer starts them as the signed-in user rather than as administrator.
         for program in ["opal-rs-tray.exe", "opal-rs-gui.exe"] {
-            let _ = Command::new("explorer.exe").arg(dir.join(program)).spawn();
+            let _ = Command::new(windows_program("explorer.exe"))
+                .arg(dir.join(program))
+                .spawn();
         }
     }
     Ok(())
@@ -186,7 +188,7 @@ fn install() -> Result<(), String> {
 fn remove() -> Result<(), String> {
     let dir = install_dir();
     stop_running();
-    let _ = Command::new("regsvr32")
+    let _ = Command::new(windows_program("System32\\regsvr32.exe"))
         .args(["/u", "/s"])
         .arg(dir.join("opal_vcam.dll"))
         .status();
@@ -234,11 +236,18 @@ fn stop_running() {
         }
     }
     for name in ["opal-rs-tray.exe", "opal-rs-gui.exe", "opal-rs.exe"] {
-        let mut c = Command::new("taskkill");
+        let mut c = Command::new(windows_program("System32\\taskkill.exe"));
         c.args(["/F", "/IM", name]);
-        std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+        std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
         let _ = c.output();
     }
+}
+
+/// A program in the Windows folder, by full path so a file of the same name next to setup is not run instead.
+fn windows_program(name: &str) -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from)
+        .join(name)
 }
 
 fn delete_at_restart(path: &Path) {

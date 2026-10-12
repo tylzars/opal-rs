@@ -11,28 +11,15 @@ const BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
 const MEMORY_MMAP: u32 = 1;
 const FIELD_NONE: u32 = 1;
 
-pub const fn fourcc(code: &[u8; 4]) -> u32 {
+const fn fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
 }
 
 pub const NV12: u32 = fourcc(b"NV12");
-pub const YUYV: u32 = fourcc(b"YUYV");
-
-#[repr(C)]
-#[derive(Default)]
-struct Capability {
-    driver: [u8; 16],
-    card: [u8; 32],
-    bus_info: [u8; 32],
-    version: u32,
-    capabilities: u32,
-    device_caps: u32,
-    reserved: [u32; 3],
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
-pub struct PixFormat {
+struct PixFormat {
     pub width: u32,
     pub height: u32,
     pub pixelformat: u32,
@@ -113,11 +100,9 @@ impl Default for Format {
 const fn ioc(dir: u32, nr: u32, size: usize) -> libc::c_ulong {
     ((dir << 30) | ((size as u32) << 16) | ((b'V' as u32) << 8) | nr) as libc::c_ulong
 }
-const R: u32 = 2;
 const W: u32 = 1;
 const RW: u32 = 3;
 
-const VIDIOC_QUERYCAP: libc::c_ulong = ioc(R, 0, size_of::<Capability>());
 const VIDIOC_G_FMT: libc::c_ulong = ioc(RW, 4, size_of::<Format>());
 const VIDIOC_S_FMT: libc::c_ulong = ioc(RW, 5, size_of::<Format>());
 const VIDIOC_REQBUFS: libc::c_ulong = ioc(RW, 8, size_of::<RequestBuffers>());
@@ -149,20 +134,7 @@ fn open(path: &Path, flags: i32) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn c_str(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
-
-/// Driver and card name of a video device.
-pub fn describe(path: &Path) -> io::Result<(String, String)> {
-    let fd = open(path, libc::O_RDWR | libc::O_NONBLOCK)?;
-    let mut cap = Capability::default();
-    ioctl(&fd, VIDIOC_QUERYCAP, &mut cap)?;
-    Ok((c_str(&cap.driver), c_str(&cap.card)))
-}
-
-fn set_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u32) -> io::Result<PixFormat> {
+fn set_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u32) -> io::Result<()> {
     let mut f = Format {
         type_,
         ..Default::default()
@@ -186,7 +158,7 @@ fn set_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u3
             pixelformat.to_le_bytes().map(char::from)
         )));
     }
-    Ok(pix)
+    Ok(())
 }
 
 struct Mapped {
@@ -202,21 +174,18 @@ impl Drop for Mapped {
 
 pub struct Frame<'a> {
     pub data: &'a [u8],
-    pub sequence: u32,
-    pub timestamp: Duration,
 }
 
 /// Memory-mapped streaming capture.
 pub struct Capture {
     fd: OwnedFd,
     buffers: Vec<Mapped>,
-    pub format: PixFormat,
 }
 
 impl Capture {
     pub fn open(path: &Path, width: u32, height: u32, pixelformat: u32) -> io::Result<Self> {
         let fd = open(path, libc::O_RDWR | libc::O_NONBLOCK)?;
-        let format = set_format(&fd, BUF_TYPE_VIDEO_CAPTURE, width, height, pixelformat)?;
+        set_format(&fd, BUF_TYPE_VIDEO_CAPTURE, width, height, pixelformat)?;
 
         let mut req = RequestBuffers {
             count: 4,
@@ -253,7 +222,7 @@ impl Capture {
         }
         let mut t = BUF_TYPE_VIDEO_CAPTURE as i32;
         ioctl(&fd, VIDIOC_STREAMON, &mut t)?;
-        Ok(Self { fd, buffers, format })
+        Ok(Self { fd, buffers })
     }
 
     /// Waits for the next frame and passes it to `f`. The buffer is handed back to the driver after.
@@ -279,12 +248,7 @@ impl Capture {
         let mapped = &self.buffers[b.index as usize];
         let used = (b.bytesused as usize).min(mapped.len);
         let data = unsafe { std::slice::from_raw_parts(mapped.ptr as *const u8, used) };
-        let timestamp = Duration::new(b.timestamp.tv_sec as u64, b.timestamp.tv_usec as u32 * 1000);
-        let out = f(Frame {
-            data,
-            sequence: b.sequence,
-            timestamp,
-        });
+        let out = f(Frame { data });
         ioctl(&self.fd, VIDIOC_QBUF, &mut b)?;
         Ok(out)
     }
@@ -300,14 +264,13 @@ impl Drop for Capture {
 /// Write-based output, for v4l2loopback.
 pub struct Output {
     fd: OwnedFd,
-    pub format: PixFormat,
 }
 
 impl Output {
     pub fn open(path: &Path, width: u32, height: u32, pixelformat: u32) -> io::Result<Self> {
         let fd = open(path, libc::O_RDWR)?;
-        let format = set_format(&fd, BUF_TYPE_VIDEO_OUTPUT, width, height, pixelformat)?;
-        Ok(Self { fd, format })
+        set_format(&fd, BUF_TYPE_VIDEO_OUTPUT, width, height, pixelformat)?;
+        Ok(Self { fd })
     }
 
     pub fn write(&mut self, frame: &[u8]) -> io::Result<()> {
@@ -333,7 +296,6 @@ mod tests {
 
     #[test]
     fn struct_sizes_match_kernel_abi() {
-        assert_eq!(size_of::<Capability>(), 104);
         assert_eq!(size_of::<PixFormat>(), 48);
         assert_eq!(size_of::<Format>(), 208);
         assert_eq!(size_of::<RequestBuffers>(), 20);
@@ -342,7 +304,6 @@ mod tests {
 
     #[test]
     fn ioctl_numbers_match_kernel_headers() {
-        assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
         assert_eq!(VIDIOC_S_FMT, 0xc0d0_5605);
         assert_eq!(VIDIOC_REQBUFS, 0xc014_5608);
         assert_eq!(VIDIOC_QBUF, 0xc058_560f);

@@ -1,6 +1,4 @@
-//! The control channel between the service and `ctl`, the control panel and the tray: one command line in, one
-//! reply line out. A Unix socket on Linux; on Windows a local TCP port, whose number and a secret token are kept in a
-//! file only this user can read, and every connection starts with the token.
+//! Control channel to the service: one command line in, one reply out (Unix socket, or local TCP with a token).
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -91,17 +89,23 @@ impl Listener {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(e) => return Err(e),
         };
-        stream.set_nonblocking(false)?;
+        if stream.set_nonblocking(false).is_err() {
+            return Ok(None);
+        }
+        // A connection that fails here is the client's problem, not the listener's.
         #[cfg(not(unix))]
         {
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            // Byte by byte, so the command line after the token stays unread.
-            let mut token = Vec::new();
-            let mut byte = [0u8];
-            while token.len() < 64 && (&stream).read(&mut byte)? == 1 && byte[0] != b'\n' {
-                token.push(byte[0]);
-            }
-            if token != self.token.as_bytes() {
+            let token = || -> io::Result<Vec<u8>> {
+                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                // Byte by byte, so the command line after the token stays unread.
+                let mut token = Vec::new();
+                let mut byte = [0u8];
+                while token.len() < 64 && (&stream).read(&mut byte)? == 1 && byte[0] != b'\n' {
+                    token.push(byte[0]);
+                }
+                Ok(token)
+            };
+            if !token().is_ok_and(|t| t == self.token.as_bytes()) {
                 return Ok(None);
             }
         }
@@ -162,6 +166,27 @@ pub fn request_data(command: &str, timeout: Duration) -> io::Result<(String, Vec
     Ok((words.to_owned(), data))
 }
 
+/// A command's words after the first `skip`, as typed, so a file path with spaces stays whole.
+pub fn tail(line: &str, skip: usize) -> &str {
+    let mut s = line.trim();
+    for _ in 0..skip {
+        s = s.find(char::is_whitespace).map_or("", |i| &s[i..]).trim_start();
+    }
+    s
+}
+
+/// A look or file followed by an optional amount, as `lut` takes them.
+pub fn split_amount(args: &str) -> (&str, Option<f32>) {
+    match args.rsplit_once(char::is_whitespace) {
+        Some((rest, a)) if a.parse::<f32>().is_ok() => (rest.trim_end(), a.parse().ok()),
+        _ => (args, None),
+    }
+}
+
+/// Process creation flag for a child without a console window.
+#[cfg(windows)]
+pub const NO_WINDOW: u32 = 0x0800_0000;
+
 /// One of the opal-rs programs: next to the running one if it is there, else found on the PATH.
 pub fn program(name: &str) -> PathBuf {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
@@ -197,9 +222,8 @@ pub fn start_service() -> io::Result<()> {
         std::fs::create_dir_all(&dir)?;
         let log = std::fs::File::create(dir.join("service.log"))?;
         let mut c = std::process::Command::new(program("opal-rs"));
-        // No console window.
         c.arg("run")
-            .creation_flags(0x0800_0000)
+            .creation_flags(NO_WINDOW)
             .stdout(log.try_clone()?)
             .stderr(log);
         c.spawn().map(drop)
@@ -221,6 +245,20 @@ fn new_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words() {
+        assert_eq!(
+            tail("background  C:\\My Pictures\\a b.jpg ", 1),
+            "C:\\My Pictures\\a b.jpg"
+        );
+        assert_eq!(tail("lut", 1), "");
+        assert_eq!(
+            split_amount("my looks/film.cube 0.80"),
+            ("my looks/film.cube", Some(0.8))
+        );
+        assert_eq!(split_amount("noir"), ("noir", None));
+    }
 
     #[test]
     fn request_and_reply() {
