@@ -15,8 +15,8 @@
    Each file is checked against its SHA-256. `opal-rs assets verify` checks them again.
 
 ## Running
-1. Let your user open the camera and create the virtual camera (needs `v4l2loopback`, e.g. the
-   `v4l2loopback-dkms` package):
+1. Give yourself access to the camera and set up the virtual camera that apps will use. This needs the
+   `v4l2loopback` kernel module (on Ubuntu or Debian: `sudo apt install v4l2loopback-dkms`).
    ```shell
    sudo cp dist/70-opal-c1.rules /etc/udev/rules.d/
    sudo udevadm control --reload
@@ -24,6 +24,8 @@
    echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
    sudo modprobe v4l2loopback
    ```
+   The first two commands let you use the camera without root. The rest create the "Opal C1 Virtual" camera now and
+   every time the computer starts.
 2. Install and start the service:
    ```shell
    cargo install --path crates/cli
@@ -33,7 +35,7 @@
    ```
    Apps see the camera as "Opal C1 Virtual" (`/dev/video10`). It streams while an app has it open and the LED is
    white while it streams.
-3. Control it while it runs:
+3. Change settings while it runs:
    ```shell
    opal-rs ctl status
    opal-rs ctl focus 120      # manual focus, 0-255
