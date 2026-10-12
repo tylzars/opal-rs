@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod daemon;
 mod mains;
+mod platform;
 #[cfg(unix)]
 mod settings;
 #[cfg(unix)]
@@ -101,17 +102,18 @@ fn asset_dir() -> PathBuf {
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// Stops on Ctrl-C (and on Unix also on SIGTERM).
+/// Stops on Ctrl-C, or closing the console on Windows, or SIGTERM on Unix.
 fn on_stop() -> Result<()> {
-    ctrlc::set_handler(|| STOP.store(true, Ordering::Relaxed)).context("stop handler")
+    ctrlc::set_handler(request_stop).context("stop handler")
+}
+
+/// Asks everything to stop, as `ctl quit` does.
+fn request_stop() {
+    STOP.store(true, Ordering::Relaxed);
 }
 
 /// True once a stop was asked for.
 fn stopped() -> bool {
-    #[cfg(unix)]
-    if daemon::stopped() {
-        return true;
-    }
     STOP.load(Ordering::Relaxed)
 }
 
@@ -152,7 +154,7 @@ const RESTART_WINDOW: Duration = Duration::from_secs(600);
 #[cfg(unix)]
 fn sleep_unless_stopped(d: Duration) {
     let end = Instant::now() + d;
-    while !daemon::stopped() && Instant::now() < end {
+    while !stopped() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(250).min(end - Instant::now()));
     }
 }
@@ -322,6 +324,7 @@ fn main() -> Result<ExitCode> {
             lut,
             settings,
         } => {
+            on_stop()?;
             let settings_path = settings.unwrap_or_else(settings::default_path);
             let settings = settings::Settings::load(&settings_path);
             let mut overrides = Vec::new();
@@ -341,11 +344,11 @@ fn main() -> Result<ExitCode> {
                 let result = run_session(&dir, output.clone(), settings, &overrides);
                 if daemon::take_restart() && result.is_ok() {
                     sleep_unless_stopped(boot_wait());
-                    if !daemon::stopped() {
+                    if !stopped() {
                         continue;
                     }
                 }
-                if daemon::stopped() {
+                if stopped() {
                     result?;
                     break;
                 }
@@ -358,7 +361,7 @@ fn main() -> Result<ExitCode> {
                 eprintln!("{err:#}; waiting for the camera");
                 wait_for_camera(Duration::MAX)?;
                 sleep_unless_stopped(boot_wait());
-                if daemon::stopped() {
+                if stopped() {
                     break;
                 }
             }

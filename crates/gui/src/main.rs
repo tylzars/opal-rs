@@ -6,8 +6,6 @@ mod preview;
 mod theme;
 mod view;
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,21 +27,14 @@ fn video_size(name: &str) -> (usize, usize) {
         .map_or((1920, 1080), |r| (r.1, r.2))
 }
 
-fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("opal-rs.sock")
-}
-
 /// Sends one command to the service and returns its reply.
 pub(crate) fn send(command: &str) -> Result<String, String> {
-    let mut s = UnixStream::connect(socket_path()).map_err(|_| "the opal-rs service is not running".to_owned())?;
-    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    writeln!(s, "{command}").map_err(|e| e.to_string())?;
-    let mut reply = String::new();
-    BufReader::new(&s).read_line(&mut reply).map_err(|e| e.to_string())?;
-    let reply = reply.trim_end().to_owned();
+    let reply = opal_ipc::request(command, Duration::from_secs(5)).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            "the opal-rs service is not running".to_owned()
+        }
+        _ => e.to_string(),
+    })?;
     match reply.strip_prefix("error: ") {
         Some(e) => Err(e.to_owned()),
         None => Ok(reply),

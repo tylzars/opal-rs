@@ -17,9 +17,13 @@ opal-assets = { path = "../assets" }
 opal-c1 = { version = "0.1.0", path = "../c1" }
 opal-dai = { version = "0.1.0", path = "../dai" }
 opal-effects = { version = "0.1.0", path = "../effects" }
+opal-ipc = { version = "0.1.0", path = "../ipc" }
 opal-xlink = { version = "0.1.0", path = "../xlink" }
 
 [target.'cfg(unix)'.dependencies]
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2.190"
 opal-v4l2 = { version = "0.1.0", path = "../v4l2" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation"] }

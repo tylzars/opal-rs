@@ -45,12 +45,7 @@ const PRESET: &[(&str, &str)] = &[
 const ADJUSTMENTS: &[&str] = &["warmth", "tint", "shadows", "highlights", "vibrance"];
 
 pub fn default_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("opal-rs")
-        .join("settings")
+    crate::platform::config_dir().join("settings")
 }
 
 /// The setting a command changes, if it is one that is kept.

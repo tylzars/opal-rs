@@ -183,7 +183,7 @@ impl Sticker {
         match &self.kind {
             Kind::Text { text, .. } => text.clone(),
             Kind::Card { name, title } => format!("{name}|{title}"),
-            Kind::Clock { .. } => local_time(),
+            Kind::Clock { .. } => crate::platform::local_time(),
             Kind::Timer { start, .. } => {
                 let s = start.elapsed().as_secs();
                 format!("{:02}:{:02}", s / 60, s % 60)
@@ -217,14 +217,6 @@ impl Sticker {
         self.cache = Some((content, height, img.clone()));
         Some(img)
     }
-}
-
-/// Local wall-clock time as HH:MM.
-fn local_time() -> String {
-    let now = unsafe { libc::time(std::ptr::null_mut()) };
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&now, &mut tm) };
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 #[derive(Default)]

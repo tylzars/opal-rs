@@ -1,29 +1,14 @@
 //! Tray icon for the opal-rs service: shows whether the camera is on and offers the common switches.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, RadioGroup, RadioItem, StandardItem};
 use ksni::{Icon, MenuItem};
 
-fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("opal-rs.sock")
-}
-
 /// Sends one command to the service and returns its reply.
 fn send(command: &str) -> Option<String> {
-    let mut s = UnixStream::connect(socket_path()).ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    writeln!(s, "{command}").ok()?;
-    let mut reply = String::new();
-    BufReader::new(&s).read_line(&mut reply).ok()?;
-    Some(reply.trim_end().to_owned())
+    opal_ipc::request(command, Duration::from_secs(5)).ok()
 }
 
 /// Word following `key` in the status line.

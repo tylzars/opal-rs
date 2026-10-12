@@ -1,7 +1,6 @@
 //! Long-running camera session controlled over a Unix socket.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,28 +43,11 @@ const DEFAULT_BLUR: usize = 24;
 /// How far each new mask moves the smoothed one.
 const MASK_FOLLOW: f32 = 0.5;
 
-static TERMINATE: AtomicBool = AtomicBool::new(false);
 static RESTART: AtomicBool = AtomicBool::new(false);
 
 /// True, once, after a command asked for the session to be rebuilt (a new resolution).
 pub fn take_restart() -> bool {
     RESTART.swap(false, Ordering::Relaxed)
-}
-
-extern "C" fn on_signal(_: libc::c_int) {
-    TERMINATE.store(true, Ordering::Relaxed);
-}
-
-/// True once a stop was requested by a signal or `ctl quit`.
-pub fn stopped() -> bool {
-    TERMINATE.load(Ordering::Relaxed)
-}
-
-pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("opal-rs.sock")
 }
 
 /// Who decides whether the camera streams.
@@ -930,29 +912,6 @@ fn centre_crop(w: usize, h: usize, factor: f32) -> opal_effects::Rect {
     }
 }
 
-/// The logind session of the user's desktop.
-fn display_session() -> Option<String> {
-    let out = std::process::Command::new("loginctl")
-        .args(["show-user", &std::env::var("USER").ok()?, "-p", "Display", "--value"])
-        .output()
-        .ok()?;
-    let id = String::from_utf8(out.stdout).ok()?.trim().to_owned();
-    (!id.is_empty()).then_some(id)
-}
-
-/// Whether the desktop session is locked, as its lock screen reports to logind.
-fn screen_locked(session: &str) -> Option<bool> {
-    let out = std::process::Command::new("loginctl")
-        .args(["show-session", session, "-p", "LockedHint", "--value"])
-        .output()
-        .ok()?;
-    match String::from_utf8_lossy(&out.stdout).trim() {
-        "yes" => Some(true),
-        "no" => Some(false),
-        _ => None,
-    }
-}
-
 /// Device log level for `OPAL_RS_LOG`.
 fn log_level(name: &str) -> Option<i32> {
     ["trace", "debug", "info", "warn", "error", "critical", "off"]
@@ -1015,7 +974,6 @@ fn find_camera_node() -> Option<PathBuf> {
         })
 }
 
-/// Number of other processes that have `path` open.
 /// Names of the programs that have `path` open, one entry per process.
 fn consumers(path: &Path) -> Vec<String> {
     let me = std::process::id().to_string();
@@ -1042,14 +1000,13 @@ fn consumers(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn handle(session: &Session, stream: UnixStream) -> Result<()> {
-    stream.set_nonblocking(false)?;
+fn handle(session: &Session, stream: opal_ipc::Stream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let line = line.trim();
     let reply = if line == "quit" {
-        TERMINATE.store(true, Ordering::Relaxed);
+        crate::request_stop();
         Ok(String::new())
     } else {
         session.command(line)
@@ -1464,14 +1421,7 @@ pub fn run(
         });
     }
 
-    unsafe {
-        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-    }
-    let socket = socket_path();
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).with_context(|| socket.display().to_string())?;
-    listener.set_nonblocking(true)?;
+    let listener = opal_ipc::Listener::bind().with_context(|| opal_ipc::location().display().to_string())?;
     println!("running");
 
     let mut result = Ok(());
@@ -1499,9 +1449,9 @@ pub fn run(
             }
         })
     };
-    let lock_session = display_session();
+    let screen_lock = crate::platform::ScreenLock::new();
     let mut last_lock = Instant::now() - LOCK_PERIOD;
-    while !TERMINATE.load(Ordering::Relaxed) && !RESTART.load(Ordering::Relaxed) {
+    while !crate::stopped() && !RESTART.load(Ordering::Relaxed) {
         // A camera that stopped answering is kept until video is wanted (see `update`).
         if !session.alive.load(Ordering::Relaxed) && !session.frozen.load(Ordering::Relaxed) {
             result = Err(anyhow!("camera disconnected"));
@@ -1512,11 +1462,9 @@ pub fn run(
             // Closing the link makes every write to the camera fail at once instead of waiting forever.
             session.link.close("camera stopped responding");
         }
-        if let Some(id) = &lock_session
-            && last_lock.elapsed() >= LOCK_PERIOD
-        {
+        if last_lock.elapsed() >= LOCK_PERIOD {
             last_lock = Instant::now();
-            if let Some(locked) = screen_locked(id) {
+            if let Some(locked) = screen_lock.locked() {
                 session.locked.store(locked, Ordering::Relaxed);
             }
         }
@@ -1540,13 +1488,13 @@ pub fn run(
             break;
         }
         match listener.accept() {
-            Ok((stream, _)) => {
+            Ok(Some(stream)) => {
                 if let Err(e) = handle(&session, stream) {
                     eprintln!("control: {e}");
                 }
                 continue;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(None) => {}
             Err(e) => {
                 result = Err(e.into());
                 break;
@@ -1556,7 +1504,7 @@ pub fn run(
     }
     done.store(true, Ordering::Relaxed);
     let _ = temperature.join();
-    let _ = std::fs::remove_file(&socket);
+    drop(listener);
     if session.alive.load(Ordering::Relaxed) {
         let mut st = session.state.lock().unwrap();
         let _ = session.set_streaming(&mut st, false);
@@ -1570,9 +1518,8 @@ pub fn run(
 
 /// Sends one command to a running session and prints the reply.
 pub fn send(words: &[String]) -> Result<bool> {
-    let socket = socket_path();
     let mut stream =
-        UnixStream::connect(&socket).with_context(|| format!("no running session at {}", socket.display()))?;
+        opal_ipc::connect().with_context(|| format!("no running session at {}", opal_ipc::location().display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut words = words.to_vec();
     // Paths are resolved by the daemon, which runs in another directory.

@@ -2594,8 +2594,13 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "opal-effects",
+ "opal-ipc",
  "opal-v4l2",
 ]
+
+[[package]]
+name = "opal-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "opal-rs"
@@ -2610,8 +2615,10 @@ dependencies = [
  "opal-c1",
  "opal-dai",
  "opal-effects",
+ "opal-ipc",
  "opal-v4l2",
  "opal-xlink",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2619,6 +2626,7 @@ name = "opal-tray"
 version = "0.1.0"
 dependencies = [
  "ksni",
+ "opal-ipc",
 ]
 
 [[package]]
