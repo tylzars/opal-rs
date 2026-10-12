@@ -15,7 +15,7 @@ use opal_c1::hands::{self, Gesture, Gestures, HandBox, View};
 use opal_c1::{Branch, Resolution};
 use opal_dai::device::Device;
 use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, antibanding, awb};
-use opal_effects::{BackgroundBlur, Cube, Framing, Mask, Speed, YuvLut, crop_scale};
+use opal_effects::{Adjust, BackgroundBlur, Cube, Framing, Mask, Speed, YuvLut, crop_scale};
 use opal_xlink::{Link, StreamId};
 
 use crate::settings::Settings;
@@ -33,6 +33,12 @@ const LOW_POWER_START: Duration = Duration::from_secs(3);
 const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
 const TEMPERATURE_PERIOD: Duration = Duration::from_secs(5);
+const LOCK_PERIOD: Duration = Duration::from_secs(2);
+/// A camera that sends nothing for this long (not even keepalive replies) has stopped answering. Building a
+/// pipeline can hold replies back for several seconds.
+const SILENCE: Duration = Duration::from_secs(20);
+/// How long the switch to and from the camera-off picture takes.
+const FADE: Duration = Duration::from_millis(300);
 /// Blur radius for `blur on`, in frame pixels.
 const DEFAULT_BLUR: usize = 24;
 /// How far each new mask moves the smoothed one.
@@ -75,11 +81,28 @@ struct State {
     mode: Mode,
     streaming: bool,
     consumers: usize,
+    /// Programs using the camera.
+    apps: Vec<String>,
     last_consumer: Option<Instant>,
     last_change: Instant,
     /// Frame count when streaming last started, and when the first frame after that arrived.
     start_frames: u64,
     first_frame: Option<Instant>,
+}
+
+/// Longest loop that can be recorded, and the most memory it may take.
+const LOOP_MAX: Duration = Duration::from_secs(10);
+const LOOP_BYTES: usize = 256 << 20;
+
+/// A short recording that can play in place of the live video.
+#[derive(Default)]
+struct Clip {
+    /// Half-size frames.
+    frames: Vec<Vec<u8>>,
+    recording: Option<Instant>,
+    /// Playing, and whether it goes back and forth; the playback step.
+    playing: Option<bool>,
+    step: usize,
 }
 
 /// Fixed facts about the connected camera, shown in status.
@@ -96,6 +119,8 @@ pub struct DeviceInfo {
 struct Blur {
     /// In frame pixels; 0 is off.
     radius: usize,
+    /// Hexagonal lens blur instead of the smooth one.
+    lens: bool,
     /// Picture shown instead of the background, as an NV12 frame.
     background: Option<(String, Arc<Vec<u8>>)>,
     mask: Option<Mask>,
@@ -134,10 +159,10 @@ fn load_background(path: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
     Ok(nv12)
 }
 
-/// Colour lookup table applied to every frame.
+/// A colour look and how strongly it is applied.
 struct Look {
     name: String,
-    lut: Arc<YuvLut>,
+    cube: Cube,
     amount: f32,
 }
 
@@ -155,11 +180,7 @@ fn load_look(look: &str, amount: f32) -> Result<Look> {
             )
         }
     };
-    Ok(Look {
-        name,
-        lut: Arc::new(YuvLut::new(&cube)),
-        amount,
-    })
+    Ok(Look { name, cube, amount })
 }
 
 /// Auto framing: follows a face with a crop.
@@ -173,6 +194,9 @@ struct Zoom {
 /// Hand gestures: peace turns the video off and on, a pinch turns face framing off and on.
 struct Hands {
     enabled: bool,
+    /// Which gestures do anything.
+    peace: bool,
+    pinch: bool,
     /// The box of the landmark crop asked for, while waiting for its result.
     pending: Option<(HandBox, Instant)>,
     seen: bool,
@@ -200,13 +224,33 @@ struct Session {
     state: Mutex<State>,
     blur: Mutex<Blur>,
     look: Mutex<Option<Look>>,
+    adjust: Mutex<Adjust>,
+    /// The look and adjustments in one table; none while both are off.
+    colour_lut: Mutex<Option<Arc<YuvLut>>>,
     zoom: Mutex<Zoom>,
     hands: Mutex<Hands>,
     /// Microphone on, and its gain in dB.
     mic_state: Mutex<(bool, f32)>,
     /// Set by the peace gesture: black frames instead of video.
     video_off: AtomicBool,
+    /// Centre zoom factor, 1 for none. Face framing takes over while it is on.
+    magnify: Mutex<f32>,
+    /// Pixelation strength, 0 to 1.
+    pixelate: Mutex<f32>,
+    skin: Mutex<opal_effects::Skin>,
+    stickers: Mutex<crate::stickers::Stickers>,
+    clip: Mutex<Clip>,
+    /// Centre of the face being followed, 0 to 1, and when it was seen.
+    face: Mutex<Option<((f32, f32), Instant)>>,
+    /// Whether the segmentation and face networks are running.
+    branch_on: Mutex<[bool; 2]>,
     info: DeviceInfo,
+    /// The camera stopped answering. While nothing needs video it is left alone; it is rebooted only once
+    /// something wants to stream, so a camera that stops while idle causes no USB churn.
+    frozen: AtomicBool,
+    /// The screen is locked, and whether that turns the camera off.
+    locked: AtomicBool,
+    lock_pause: AtomicBool,
     settings: Mutex<Settings>,
     frames: AtomicU64,
     /// Average chip temperature in degrees C.
@@ -234,6 +278,157 @@ impl Session {
         Ok(())
     }
 
+    /// The status line. Each value is copied out under its own short lock, so no two are held at once.
+    fn status_line(&self) -> String {
+        let (mode, streaming, consumers, apps) = {
+            let st = self.state.lock().unwrap();
+            let apps = if st.apps.is_empty() {
+                "-".to_owned()
+            } else {
+                st.apps.join(",")
+            };
+            (
+                format!("{:?}", st.mode).to_lowercase(),
+                st.streaming,
+                st.consumers,
+                apps,
+            )
+        };
+        let (radius, background, masks, person) = {
+            let b = self.blur.lock().unwrap();
+            let person = b
+                .mask
+                .as_ref()
+                .map_or(0.0, |m| m.data.iter().sum::<f32>() / m.data.len() as f32);
+            (
+                b.radius,
+                // One word, so the status line keeps one value per key.
+                b.background
+                    .as_ref()
+                    .map_or("none".to_owned(), |b| b.0.replace(char::is_whitespace, "_")),
+                b.masks,
+                person,
+            )
+        };
+        let look = self.look.lock().unwrap().as_ref().map_or("none".into(), |l| {
+            format!("{} {:.2}", l.name.replace(char::is_whitespace, "_"), l.amount)
+        });
+        let zoom = {
+            let z = self.zoom.lock().unwrap();
+            if z.enabled {
+                format!("{:.2} faces {}", z.framing.amount, z.faces)
+            } else {
+                "off".into()
+            }
+        };
+        let hands = {
+            let h = self.hands.lock().unwrap();
+            match (h.enabled, h.seen) {
+                (false, _) => "off".to_owned(),
+                (true, seen) => format!(
+                    "on hand {} last {}",
+                    if seen { "yes" } else { "no" },
+                    h.last.map_or("-".into(), |g| format!("{g:?}").to_lowercase()),
+                ),
+            }
+        };
+        let temperature = self
+            .temperature
+            .lock()
+            .unwrap()
+            .map_or("-".into(), |t| format!("{t:.1}"));
+        let adjust = if self.adjust.lock().unwrap().is_neutral() {
+            "off"
+        } else {
+            "on"
+        };
+        let mic = if self.mic_state.lock().unwrap().0 { "on" } else { "off" };
+        let video = if self.video_off.load(Ordering::Relaxed) {
+            "off"
+        } else {
+            "on"
+        };
+        let locked = if self.locked.load(Ordering::Relaxed) {
+            "yes"
+        } else {
+            "no"
+        };
+        let magnify = *self.magnify.lock().unwrap();
+        let pixelate = *self.pixelate.lock().unwrap() * 100.0;
+        let touchup = self.skin.lock().unwrap().smooth * 100.0;
+        let stickers = self.stickers.lock().unwrap().list.len();
+        let clip = {
+            let c = self.clip.lock().unwrap();
+            let n = c.frames.len();
+            match (c.recording, c.playing) {
+                (Some(_), _) => format!("recording {n}"),
+                (None, Some(true)) => format!("bounce {n}"),
+                (None, Some(false)) => format!("playing {n}"),
+                _ => format!("off {n}"),
+            }
+        };
+        // `apps` comes last: app names are free text and must not be mistaken for a later key.
+        format!(
+            "mode {mode} power {} resolution {} temperature {temperature} streaming {streaming} consumers {consumers} \
+             frames {} blur {radius} background {background} masks {masks} person {person:.2} lut {look} \
+             adjust {adjust} zoom {zoom} gestures {hands} mic {mic} video {video} locked {locked} responding {} \
+             magnify {magnify:.2} pixelate {pixelate:.0} touchup {touchup:.0} stickers {stickers} loop {clip} \
+             usb {} serial {} firmware {} apps {apps}",
+            if self.low_power { "low" } else { "normal" },
+            self.resolution.name(),
+            self.frames.load(Ordering::Relaxed),
+            if self.frozen.load(Ordering::Relaxed) {
+                "no"
+            } else {
+                "yes"
+            },
+            self.info.usb,
+            self.info.serial,
+            self.info.firmware,
+        )
+    }
+
+    /// Runs the segmentation and face networks only while something uses them.
+    fn sync_branches(&self) -> Result<()> {
+        // Held throughout, so two callers cannot interleave and leave a network in the wrong state.
+        let mut on = self.branch_on.lock().unwrap();
+        let (behind, follow) = self.stickers.lock().unwrap().needs();
+        let segmentation = {
+            let b = self.blur.lock().unwrap();
+            b.radius > 0 || b.background.is_some()
+        } || behind;
+        let face = self.zoom.lock().unwrap().enabled || follow;
+        if on[0] != segmentation {
+            self.set_branch(Branch::Segmentation, segmentation)?;
+            on[0] = segmentation;
+            if !segmentation {
+                self.blur.lock().unwrap().mask = None;
+            }
+        }
+        if on[1] != face {
+            self.set_branch(Branch::Face, face)?;
+            on[1] = face;
+        }
+        Ok(())
+    }
+
+    /// Writes the stickers file.
+    fn save_stickers(&self) {
+        let path = self.settings.lock().unwrap().stickers_path();
+        let text = self.stickers.lock().unwrap().text();
+        if let Err(e) = std::fs::write(&path, text) {
+            eprintln!("{}: {e}", path.display());
+        }
+    }
+
+    /// Rebuilds the colour table after the look or an adjustment changed.
+    fn rebuild_colour(&self) {
+        let look = self.look.lock().unwrap();
+        let adjust = self.adjust.lock().unwrap();
+        *self.colour_lut.lock().unwrap() = (look.is_some() || !adjust.is_neutral())
+            .then(|| Arc::new(YuvLut::new(&adjust.cube(look.as_ref().map(|l| (&l.cube, l.amount))))));
+    }
+
     fn set_streaming(&self, st: &mut State, on: bool) -> Result<()> {
         if st.streaming == on {
             return Ok(());
@@ -248,7 +443,7 @@ impl Session {
             st.start_frames = self.frames.load(Ordering::Relaxed);
             st.first_frame = None;
             self.link.write(self.control, &opal_c1::start_control().to_packet())?;
-            self.link.write(self.led, &Led::White.packet())?;
+            self.link.write(self.led, &self.streaming_led().packet())?;
             for c in self.settings.lock().unwrap().camera_commands() {
                 if let Some(c) = parse_control(c) {
                     self.link.write(self.control, &c.to_packet())?;
@@ -260,6 +455,23 @@ impl Session {
         }
         st.streaming = on;
         st.last_change = Instant::now();
+        Ok(())
+    }
+
+    /// White while video goes out; blue while the video is off and the camera only watches for gestures.
+    fn streaming_led(&self) -> Led {
+        if self.video_off.load(Ordering::Relaxed) {
+            Led::Blue
+        } else {
+            Led::White
+        }
+    }
+
+    fn set_video_off(&self, off: bool) -> Result<()> {
+        self.video_off.store(off, Ordering::Relaxed);
+        if self.state.lock().unwrap().streaming {
+            self.link.write(self.led, &self.streaming_led().packet())?;
+        }
         Ok(())
     }
 
@@ -286,7 +498,10 @@ impl Session {
             Mode::Auto => {
                 (self.output.is_none() && !self.low_power) || st.last_consumer.is_some_and(|t| t.elapsed() < OFF_DELAY)
             }
-        };
+        } && !(self.locked.load(Ordering::Relaxed) && self.lock_pause.load(Ordering::Relaxed));
+        if want && self.frozen.load(Ordering::Relaxed) {
+            bail!("camera stopped responding");
+        }
         self.set_streaming(&mut st, want)
     }
 
@@ -305,93 +520,155 @@ impl Session {
             bail!("not available in low power mode");
         }
         match words.as_slice() {
-            ["status"] => {
-                let st = self.state.lock().unwrap();
-                let blur = self.blur.lock().unwrap();
-                let person = blur
-                    .mask
-                    .as_ref()
-                    .map_or(0.0, |m| m.data.iter().sum::<f32>() / m.data.len() as f32);
-                let look = self.look.lock().unwrap();
-                let look = look
-                    .as_ref()
-                    .map_or("none".into(), |l| format!("{} {:.2}", l.name, l.amount));
-                let zoom = self.zoom.lock().unwrap();
-                let zoom = if zoom.enabled {
-                    format!("{:.2} faces {}", zoom.framing.amount, zoom.faces)
-                } else {
-                    "off".into()
-                };
-                Ok(format!(
-                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} mic {} video {} usb {} serial {} firmware {}",
-                    format!("{:?}", st.mode).to_lowercase(),
-                    if self.low_power { "low" } else { "normal" },
-                    self.resolution.name(),
-                    self.temperature
-                        .lock()
-                        .unwrap()
-                        .map_or("-".into(), |t| format!("{t:.1}")),
-                    st.streaming,
-                    st.consumers,
-                    self.frames.load(Ordering::Relaxed),
-                    blur.radius,
-                    blur.background.as_ref().map_or("none", |b| b.0.as_str()),
-                    blur.masks,
-                    person,
-                    look,
-                    zoom,
-                    {
-                        let h = self.hands.lock().unwrap();
-                        match (h.enabled, h.seen) {
-                            (false, _) => "off".to_owned(),
-                            (true, seen) => format!(
-                                "on hand {} last {}",
-                                if seen { "yes" } else { "no" },
-                                h.last.map_or("-".into(), |g| format!("{g:?}").to_lowercase()),
-                            ),
-                        }
-                    },
-                    if self.mic_state.lock().unwrap().0 { "on" } else { "off" },
-                    if self.video_off.load(Ordering::Relaxed) {
-                        "off"
-                    } else {
-                        "on"
-                    },
-                    self.info.usb,
-                    self.info.serial,
-                    self.info.firmware,
-                ))
-            }
+            ["status"] => Ok(self.status_line()),
             ["zoom", amount] => {
                 let amount: Option<f32> = match *amount {
                     "off" => None,
                     "on" => Some(0.5),
                     a => Some(a.parse::<f32>()?.clamp(0.0, 1.0)),
                 };
-                let mut zoom = self.zoom.lock().unwrap();
-                if amount.is_some() != zoom.enabled {
-                    self.set_branch(Branch::Face, amount.is_some())?;
+                {
+                    let mut zoom = self.zoom.lock().unwrap();
+                    zoom.enabled = amount.is_some();
+                    if let Some(a) = amount {
+                        zoom.framing.amount = a;
+                    }
                 }
-                zoom.enabled = amount.is_some();
-                if let Some(a) = amount {
-                    zoom.framing.amount = a;
-                }
+                self.sync_branches()?;
                 Ok(String::new())
             }
             ["gestures", on @ ("on" | "off")] => {
                 let on = *on == "on";
-                let mut h = self.hands.lock().unwrap();
-                if on != h.enabled {
+                let was = {
+                    let mut h = self.hands.lock().unwrap();
+                    let was = h.enabled;
+                    (h.enabled, h.seen, h.pending) = (on, false, None);
+                    was
+                };
+                // Written with no lock held: a write can wait on the camera.
+                if on != was {
                     self.set_branch(Branch::Palm, on)?;
                 }
-                (h.enabled, h.seen, h.pending) = (on, false, None);
                 if !on {
-                    self.video_off.store(false, Ordering::Relaxed);
+                    self.set_video_off(false)?;
+                }
+                Ok(String::new())
+            }
+            ["lockpause", on @ ("on" | "off")] => {
+                self.lock_pause.store(*on == "on", Ordering::Relaxed);
+                self.update(None)?;
+                Ok(String::new())
+            }
+            ["gesture", which @ ("peace" | "pinch"), on @ ("on" | "off")] => {
+                let mut h = self.hands.lock().unwrap();
+                let on = *on == "on";
+                if *which == "peace" {
+                    h.peace = on;
+                    drop(h);
+                    if !on {
+                        self.set_video_off(false)?;
+                    }
+                } else {
+                    h.pinch = on;
                 }
                 Ok(String::new())
             }
             ["video", on @ ("on" | "off")] => {
-                self.video_off.store(*on == "off", Ordering::Relaxed);
+                self.set_video_off(*on == "off")?;
+                Ok(String::new())
+            }
+            ["touchup", amount] => {
+                self.skin.lock().unwrap().smooth = match *amount {
+                    "off" => 0.0,
+                    a => percent(a)?,
+                };
+                Ok(String::new())
+            }
+            ["tone", "off"] => {
+                let mut s = self.skin.lock().unwrap();
+                (s.even, s.warmth) = (0.0, 0.0);
+                Ok(String::new())
+            }
+            ["tone", even, warmth] => {
+                let (even, warmth) = (percent(even)?, warmth.parse::<f32>()?);
+                anyhow::ensure!((-100.0..=100.0).contains(&warmth), "warmth -100 to 100");
+                let mut s = self.skin.lock().unwrap();
+                (s.even, s.warmth) = (even, warmth / 100.0);
+                Ok(String::new())
+            }
+            ["sticker", "add", rest @ ..] => {
+                let id = self.stickers.lock().unwrap().add(rest)?;
+                self.sync_branches()?;
+                self.save_stickers();
+                Ok(id.to_string())
+            }
+            ["sticker", "move", id, x, y, size] => {
+                {
+                    let mut st = self.stickers.lock().unwrap();
+                    let s = st.get(id)?;
+                    let (x, y, size): (f32, f32, f32) = (x.parse()?, y.parse()?, size.parse()?);
+                    anyhow::ensure!(x.is_finite() && y.is_finite(), "bad position");
+                    anyhow::ensure!((0.01..=1.0).contains(&size), "size 0.01 to 1");
+                    (s.x, s.y, s.size) = (x.clamp(-1.0, 2.0), y.clamp(-1.0, 2.0), size);
+                }
+                self.save_stickers();
+                Ok(String::new())
+            }
+            ["sticker", "flags", id, flags] => {
+                {
+                    let mut st = self.stickers.lock().unwrap();
+                    let s = st.get(id)?;
+                    (s.behind, s.follow) = (flags.contains('b'), flags.contains('f'));
+                }
+                self.sync_branches()?;
+                self.save_stickers();
+                Ok(String::new())
+            }
+            ["sticker", "remove", id] => {
+                {
+                    let mut st = self.stickers.lock().unwrap();
+                    let id = st.get(id)?.id;
+                    st.list.retain(|s| s.id != id);
+                }
+                self.sync_branches()?;
+                self.save_stickers();
+                Ok(String::new())
+            }
+            ["sticker", "clear"] => {
+                self.stickers.lock().unwrap().list.clear();
+                self.sync_branches()?;
+                self.save_stickers();
+                Ok(String::new())
+            }
+            ["sticker", "list"] => Ok(self.stickers.lock().unwrap().describe()),
+            ["loop", action @ ("record" | "stop" | "play" | "bounce" | "off")] => {
+                let mut c = self.clip.lock().unwrap();
+                match *action {
+                    "record" => {
+                        c.frames.clear();
+                        (c.recording, c.playing) = (Some(Instant::now()), None);
+                    }
+                    "stop" => c.recording = None,
+                    "off" => (c.recording, c.playing) = (None, None),
+                    play => {
+                        anyhow::ensure!(!c.frames.is_empty(), "nothing recorded");
+                        (c.recording, c.playing, c.step) = (None, Some(play == "bounce"), 0);
+                    }
+                }
+                Ok(String::new())
+            }
+            ["pixelate", amount] => {
+                *self.pixelate.lock().unwrap() = match *amount {
+                    "off" => 0.0,
+                    a => a.parse::<f32>()?.clamp(0.0, 100.0) / 100.0,
+                };
+                Ok(String::new())
+            }
+            ["magnify", factor] => {
+                *self.magnify.lock().unwrap() = match *factor {
+                    "off" => 1.0,
+                    f => f.parse::<f32>()?.clamp(1.0, 4.0),
+                };
                 Ok(String::new())
             }
             ["tracking", speed] => {
@@ -417,8 +694,55 @@ impl Session {
                 Ok(String::new())
             }
             ["settings"] => Ok(self.settings.lock().unwrap().commands().collect::<Vec<_>>().join("; ")),
+            ["preset", "list"] => {
+                let dir = self.settings.lock().unwrap().preset_dir();
+                let mut names: Vec<String> = std::fs::read_dir(&dir)
+                    .map(|d| {
+                        d.filter_map(|e| e.ok()?.file_name().into_string().ok())
+                            .filter(|n| crate::settings::preset_name(n).is_some())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                Ok(names.join(" "))
+            }
+            ["preset", action @ ("save" | "load" | "delete"), name] => {
+                let name = crate::settings::preset_name(name)
+                    .ok_or_else(|| anyhow!("preset names use letters, digits, - and _"))?;
+                let (dir, text) = {
+                    let s = self.settings.lock().unwrap();
+                    (s.preset_dir(), s.preset_text())
+                };
+                let path = dir.join(name);
+                let stickers = dir.join(format!("{name}.stickers"));
+                match *action {
+                    "save" => {
+                        std::fs::create_dir_all(&dir)?;
+                        std::fs::write(&path, text)?;
+                        std::fs::write(stickers, self.stickers.lock().unwrap().text())?;
+                    }
+                    "delete" => {
+                        std::fs::remove_file(&path).with_context(|| format!("no preset {name}"))?;
+                        let _ = std::fs::remove_file(stickers);
+                    }
+                    _ => {
+                        let text = std::fs::read_to_string(&path).with_context(|| format!("no preset {name}"))?;
+                        for c in crate::settings::preset_commands(&text) {
+                            if let Err(e) = self.command(&c) {
+                                eprintln!("preset {name}: {c}: {e}");
+                            }
+                        }
+                        let saved = std::fs::read_to_string(stickers).unwrap_or_default();
+                        self.stickers.lock().unwrap().load(&saved);
+                        self.sync_branches()?;
+                        self.save_stickers();
+                    }
+                }
+                Ok(String::new())
+            }
             ["lut", "off"] => {
                 *self.look.lock().unwrap() = None;
+                self.rebuild_colour();
                 Ok(String::new())
             }
             ["lut", path, rest @ ..] => {
@@ -428,15 +752,40 @@ impl Session {
                     _ => bail!("usage: lut <look or file.cube> [amount]"),
                 };
                 *self.look.lock().unwrap() = Some(load_look(path, amount)?);
+                self.rebuild_colour();
+                Ok(String::new())
+            }
+            ["adjust", "reset"] => {
+                *self.adjust.lock().unwrap() = Adjust::default();
+                self.rebuild_colour();
+                Ok(String::new())
+            }
+            [
+                name @ ("warmth" | "tint" | "shadows" | "highlights" | "vibrance"),
+                value,
+            ] => {
+                let name = if *name == "warmth" { "temperature" } else { name };
+                self.adjust
+                    .lock()
+                    .unwrap()
+                    .set(name, &[value.parse()?])
+                    .ok_or_else(|| anyhow!("usage: {name} -100 to 100"))?;
+                self.rebuild_colour();
+                Ok(String::new())
+            }
+            ["colour", name, hue, sat, light] => {
+                let values = [hue.parse()?, sat.parse()?, light.parse()?];
+                self.adjust
+                    .lock()
+                    .unwrap()
+                    .set(name, &values)
+                    .ok_or_else(|| anyhow!("usage: colour <red, orange, yellow, green, aqua, blue, purple or magenta> <hue> <saturation> <lightness>"))?;
+                self.rebuild_colour();
                 Ok(String::new())
             }
             ["background", "off"] => {
-                let mut blur = self.blur.lock().unwrap();
-                blur.background = None;
-                if blur.radius == 0 {
-                    self.set_branch(Branch::Segmentation, false)?;
-                    blur.mask = None;
-                }
+                self.blur.lock().unwrap().background = None;
+                self.sync_branches()?;
                 Ok(String::new())
             }
             ["background", path] => {
@@ -447,11 +796,12 @@ impl Session {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let mut blur = self.blur.lock().unwrap();
-                if blur.radius == 0 && blur.background.is_none() {
-                    self.set_branch(Branch::Segmentation, true)?;
-                }
-                blur.background = Some((name, Arc::new(image)));
+                self.blur.lock().unwrap().background = Some((name, Arc::new(image)));
+                self.sync_branches()?;
+                Ok(String::new())
+            }
+            ["bokeh", style @ ("soft" | "lens")] => {
+                self.blur.lock().unwrap().lens = *style == "lens";
                 Ok(String::new())
             }
             ["blur", radius] => {
@@ -460,14 +810,8 @@ impl Session {
                     "on" => DEFAULT_BLUR,
                     r => r.parse()?,
                 };
-                let mut blur = self.blur.lock().unwrap();
-                if (radius > 0) != (blur.radius > 0) && blur.background.is_none() {
-                    self.set_branch(Branch::Segmentation, radius > 0)?;
-                    if radius == 0 {
-                        blur.mask = None;
-                    }
-                }
-                blur.radius = radius;
+                self.blur.lock().unwrap().radius = radius;
+                self.sync_branches()?;
                 Ok(String::new())
             }
             [mode @ ("auto" | "on" | "off")] => {
@@ -482,20 +826,25 @@ impl Session {
             ["snap", path] => self.snap(Path::new(path)).map(|_| String::new()),
             ["gain", db] => {
                 let db: f32 = db.parse()?;
-                let mut mic = self.mic_state.lock().unwrap();
-                if mic.0 {
+                let on = {
+                    let mut mic = self.mic_state.lock().unwrap();
+                    mic.1 = db;
+                    mic.0
+                };
+                if on {
                     self.link.write(self.mic, &AudioInConfig::gain_db(db).to_packet())?;
                 }
-                mic.1 = db;
                 Ok(String::new())
             }
             ["mic", on @ ("on" | "off")] => {
-                let mut mic = self.mic_state.lock().unwrap();
-                mic.0 = *on == "on";
-                let config = if mic.0 {
-                    AudioInConfig::gain_db(mic.1)
-                } else {
-                    AudioInConfig::muted()
+                let config = {
+                    let mut mic = self.mic_state.lock().unwrap();
+                    mic.0 = *on == "on";
+                    if mic.0 {
+                        AudioInConfig::gain_db(mic.1)
+                    } else {
+                        AudioInConfig::muted()
+                    }
                 };
                 self.link.write(self.mic, &config.to_packet())?;
                 Ok(String::new())
@@ -563,6 +912,47 @@ fn parse_control(line: &str) -> Option<CameraControl> {
     Some(c)
 }
 
+/// A percentage from 0 to 100 as 0 to 1.
+fn percent(v: &str) -> Result<f32> {
+    let v: f32 = v.parse()?;
+    anyhow::ensure!((0.0..=100.0).contains(&v), "0 to 100");
+    Ok(v / 100.0)
+}
+
+/// The middle 1/`factor` of a `w` x `h` frame.
+fn centre_crop(w: usize, h: usize, factor: f32) -> opal_effects::Rect {
+    let (cw, ch) = (w as f32 / factor, h as f32 / factor);
+    opal_effects::Rect {
+        x: (w as f32 - cw) / 2.0,
+        y: (h as f32 - ch) / 2.0,
+        width: cw,
+        height: ch,
+    }
+}
+
+/// The logind session of the user's desktop.
+fn display_session() -> Option<String> {
+    let out = std::process::Command::new("loginctl")
+        .args(["show-user", &std::env::var("USER").ok()?, "-p", "Display", "--value"])
+        .output()
+        .ok()?;
+    let id = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Whether the desktop session is locked, as its lock screen reports to logind.
+fn screen_locked(session: &str) -> Option<bool> {
+    let out = std::process::Command::new("loginctl")
+        .args(["show-session", session, "-p", "LockedHint", "--value"])
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Device log level for `OPAL_RS_LOG`.
 fn log_level(name: &str) -> Option<i32> {
     ["trace", "debug", "info", "warn", "error", "critical", "off"]
@@ -583,7 +973,29 @@ fn black_frame((w, h): (u32, u32)) -> Vec<u8> {
 fn is_effect(command: &str) -> bool {
     matches!(
         command,
-        "blur" | "background" | "lut" | "zoom" | "tracking" | "gestures" | "video" | "snap"
+        "blur"
+            | "background"
+            | "lut"
+            | "adjust"
+            | "warmth"
+            | "tint"
+            | "shadows"
+            | "highlights"
+            | "vibrance"
+            | "colour"
+            | "zoom"
+            | "magnify"
+            | "pixelate"
+            | "touchup"
+            | "sticker"
+            | "bokeh"
+            | "loop"
+            | "tone"
+            | "tracking"
+            | "gestures"
+            | "gesture"
+            | "video"
+            | "snap"
     )
 }
 
@@ -604,10 +1016,11 @@ fn find_camera_node() -> Option<PathBuf> {
 }
 
 /// Number of other processes that have `path` open.
-fn count_consumers(path: &Path) -> usize {
+/// Names of the programs that have `path` open, one entry per process.
+fn consumers(path: &Path) -> Vec<String> {
     let me = std::process::id().to_string();
     let Ok(procs) = std::fs::read_dir("/proc") else {
-        return 0;
+        return Vec::new();
     };
     procs
         .flatten()
@@ -622,7 +1035,11 @@ fn count_consumers(path: &Path) -> usize {
                     .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == path))
             })
         })
-        .count()
+        .map(|p| {
+            std::fs::read_to_string(p.path().join("comm"))
+                .map_or_else(|_| "?".into(), |c| c.trim().replace(char::is_whitespace, "_"))
+        })
+        .collect()
 }
 
 fn handle(session: &Session, stream: UnixStream) -> Result<()> {
@@ -699,6 +1116,7 @@ pub fn run(
             mode: Mode::Auto,
             streaming: false,
             consumers: 0,
+            apps: Vec::new(),
             last_consumer: None,
             last_change: Instant::now() - RESTART_AFTER,
             start_frames: 0,
@@ -706,6 +1124,8 @@ pub fn run(
         }),
         blur: Mutex::new(Blur::default()),
         look: Mutex::new(None),
+        adjust: Mutex::new(Adjust::default()),
+        colour_lut: Mutex::new(None),
         zoom: Mutex::new(Zoom {
             enabled: false,
             framing: Framing::new(vw as usize, vh as usize),
@@ -718,10 +1138,22 @@ pub fn run(
             seen: false,
             last: None,
             gestures: Gestures::default(),
+            peace: true,
+            pinch: true,
         }),
         mic_state: Mutex::new((true, 0.0)),
         video_off: AtomicBool::new(false),
+        magnify: Mutex::new(1.0),
+        pixelate: Mutex::new(0.0),
+        skin: Mutex::new(opal_effects::Skin::default()),
+        stickers: Mutex::new(crate::stickers::Stickers::new()),
+        clip: Mutex::new(Clip::default()),
+        face: Mutex::new(None),
+        branch_on: Mutex::new([false; 2]),
         info,
+        frozen: AtomicBool::new(false),
+        locked: AtomicBool::new(false),
+        lock_pause: AtomicBool::new(true),
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
         temperature: Mutex::new(None),
@@ -734,11 +1166,23 @@ pub fn run(
     }
     let saved: Vec<String> = session.settings.lock().unwrap().commands().map(str::to_owned).collect();
     for c in saved.iter().chain(overrides) {
-        if low_power && c.split_whitespace().next().is_some_and(is_effect) {
+        let first = c.split_whitespace().next();
+        if low_power && first.is_some_and(is_effect) {
+            continue;
+        }
+        // Already applied when the camera was booted; replaying them could ask for a restart that never settles.
+        if matches!(first, Some("resolution" | "power")) {
             continue;
         }
         if let Err(e) = session.run_command(c) {
             eprintln!("{c}: {e}");
+        }
+    }
+    if !low_power {
+        let path = session.settings.lock().unwrap().stickers_path();
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            session.stickers.lock().unwrap().load(&text);
+            session.sync_branches()?;
         }
     }
 
@@ -747,6 +1191,10 @@ pub fn run(
         std::thread::spawn(move || {
             let (w, h) = (vw as usize, vh as usize);
             let mut effects = BackgroundBlur::new(w, h);
+            let placard = opal_effects::placard(w, h);
+            let mut touch_up = opal_effects::TouchUp::new(w, h);
+            // 0 shows the video, 1 the camera-off picture.
+            let (mut off_level, mut last) = (0f32, Instant::now());
             let mut frame = Vec::new();
             let mut zoomed = Vec::new();
             while let Ok(packet) = session.link.read(opal_c1::VIDEO_STREAM, None) {
@@ -755,12 +1203,15 @@ pub fn run(
                 };
                 frame.clear();
                 frame.extend_from_slice(data);
-                let look = session.look.lock().unwrap().as_ref().map(|l| (l.lut.clone(), l.amount));
-                if let (Some((lut, amount)), true) = (look, frame.len() >= w * h * 3 / 2) {
-                    lut.apply(&mut frame, w, h, amount);
+                let skin = *session.skin.lock().unwrap();
+                touch_up.apply(&mut frame, skin);
+                let lut = session.colour_lut.lock().unwrap().clone();
+                if let (Some(lut), true) = (lut, frame.len() >= w * h * 3 / 2) {
+                    lut.apply(&mut frame, w, h, 1.0);
                 }
                 let (radius, mask, background) = {
                     let blur = session.blur.lock().unwrap();
+                    effects.lens = blur.lens;
                     (
                         blur.radius,
                         blur.mask.clone(),
@@ -776,17 +1227,72 @@ pub fn run(
                 let crop = {
                     let mut zoom = session.zoom.lock().unwrap();
                     let crop = zoom.framing.step();
-                    (zoom.enabled && !zoom.framing.is_full()).then_some(crop)
+                    let m = *session.magnify.lock().unwrap();
+                    if zoom.enabled {
+                        (!zoom.framing.is_full()).then_some(crop)
+                    } else {
+                        (m > 1.0).then(|| centre_crop(w, h, m))
+                    }
                 };
+                let shown = crop.unwrap_or(opal_effects::Rect::full(w, h));
                 if let (Some(crop), true) = (crop, frame.len() >= w * h * 3 / 2) {
                     zoomed.resize(frame.len(), 0);
                     crop_scale(&frame, &mut zoomed, w, h, crop);
                     std::mem::swap(&mut frame, &mut zoomed);
                 }
-                if session.video_off.load(Ordering::Relaxed) {
-                    frame.fill(0);
-                    let y = w * h;
-                    frame[y..].fill(128);
+                let block = opal_effects::pixel_block(*session.pixelate.lock().unwrap(), h);
+                if block > 0 && frame.len() >= w * h * 3 / 2 {
+                    opal_effects::pixelate(&mut frame, w, h, block);
+                }
+                {
+                    let mut st = session.stickers.lock().unwrap();
+                    if !st.list.is_empty() && frame.len() >= w * h * 3 / 2 {
+                        let face = session
+                            .face
+                            .lock()
+                            .unwrap()
+                            .filter(|(_, t)| t.elapsed() < Duration::from_secs(1))
+                            .map(|(c, _)| c);
+                        // The mask copied above; locking the blur again here, inside the stickers lock, could deadlock.
+                        let scene = crate::stickers::Scene {
+                            crop: shown,
+                            face,
+                            mask: if st.needs().0 { mask.as_ref() } else { None },
+                        };
+                        st.draw(&mut frame, w, h, &scene);
+                    }
+                }
+                {
+                    let mut c = session.clip.lock().unwrap();
+                    if frame.len() >= w * h * 3 / 2 {
+                        if let Some(started) = c.recording {
+                            if started.elapsed() < LOOP_MAX && (c.frames.len() + 1) * (w * h * 3 / 8) <= LOOP_BYTES {
+                                c.frames.push(opal_effects::halve(&frame, w, h));
+                            } else {
+                                c.recording = None;
+                            }
+                        } else if let Some(bounce) = c.playing
+                            && !c.frames.is_empty()
+                        {
+                            let i = opal_effects::clip_frame(c.step, c.frames.len(), bounce);
+                            c.step += 1;
+                            opal_effects::double(&c.frames[i], &mut frame, w, h);
+                        }
+                    }
+                }
+                let step = last.elapsed().as_secs_f32() / FADE.as_secs_f32();
+                last = Instant::now();
+                off_level = if session.video_off.load(Ordering::Relaxed) {
+                    (off_level + step).min(1.0)
+                } else {
+                    (off_level - step).max(0.0)
+                };
+                if frame.len() == placard.len() {
+                    if off_level >= 1.0 {
+                        frame.copy_from_slice(&placard);
+                    } else if off_level > 0.0 {
+                        opal_effects::fade(&mut frame, &placard, off_level);
+                    }
                 }
                 if let Some(out) = &mut out
                     && let Err(e) = out.write(&frame)
@@ -847,6 +1353,7 @@ pub fn run(
                 if let Some(face) = zoom.tracker.update(&found) {
                     let (cx, cy) = face.center();
                     zoom.framing.face(cx, cy, face.height());
+                    *session.face.lock().unwrap() = Some(((cx, cy), Instant::now()));
                 }
             }
         });
@@ -864,19 +1371,23 @@ pub fn run(
                 let Some((nn, data)) = NnData::parse(&packet) else {
                     continue;
                 };
-                let mut h = session.hands.lock().unwrap();
-                if !h.enabled || h.pending.is_some_and(|(_, t)| t.elapsed() < CROP_TIMEOUT) {
-                    continue;
-                }
-                let scores = nn.tensor_f32(data, "classificators").unwrap_or_default();
-                let regressors = nn.tensor_f32(data, "regressors").unwrap_or_default();
-                h.pending = None;
-                h.seen = false;
-                if let Some(b) = view.palm(&scores, &regressors) {
-                    if session.link.write(crop_in, &view.crop(&b).to_packet()).is_err() {
-                        break;
+                let found = {
+                    let mut h = session.hands.lock().unwrap();
+                    if !h.enabled || h.pending.is_some_and(|(_, t)| t.elapsed() < CROP_TIMEOUT) {
+                        continue;
                     }
-                    h.pending = Some((b, Instant::now()));
+                    let scores = nn.tensor_f32(data, "classificators").unwrap_or_default();
+                    let regressors = nn.tensor_f32(data, "regressors").unwrap_or_default();
+                    h.seen = false;
+                    let found = view.palm(&scores, &regressors);
+                    h.pending = found.map(|b| (b, Instant::now()));
+                    found
+                };
+                // Written with no lock held: a write can wait on the camera.
+                if let Some(b) = found
+                    && session.link.write(crop_in, &view.crop(&b).to_packet()).is_err()
+                {
+                    break;
                 }
             }
         });
@@ -906,25 +1417,34 @@ pub fn run(
                     let raw = nn.tensor_f32(data, "Identity_dense/BiasAdd/Add").unwrap_or_default();
                     let hand = view.hand(&b, first("Identity_1"), first("Identity_2"), &raw);
                     h.seen = hand.is_some();
-                    if let (Some(hand), true) = (&hand, h.enabled) {
-                        let next = hands::follow(hand);
-                        if session.link.write(crop_in, &view.crop(&next).to_packet()).is_ok() {
-                            h.pending = Some((next, Instant::now()));
-                        }
-                    }
+                    let next = hand.as_ref().filter(|_| h.enabled).map(hands::follow);
+                    h.pending = next.map(|n| (n, Instant::now()));
                     let fired = h.gestures.update(hand.as_ref().and_then(|x| x.gesture(aspect)));
                     if fired.is_some() {
                         h.last = fired;
                     }
-                    fired
+                    (fired, next)
+                };
+                let (fired, next) = fired;
+                // Written with no lock held: a write can wait on the camera.
+                if let Some(next) = next
+                    && session.link.write(crop_in, &view.crop(&next).to_packet()).is_err()
+                {
+                    session.hands.lock().unwrap().pending = None;
+                }
+                let (peace, pinch) = {
+                    let h = session.hands.lock().unwrap();
+                    (h.peace, h.pinch)
                 };
                 let command = match fired {
-                    Some(Gesture::Peace) => {
+                    Some(Gesture::Peace) if peace => {
                         let off = !session.video_off.load(Ordering::Relaxed);
-                        session.video_off.store(off, Ordering::Relaxed);
+                        if let Err(e) = session.set_video_off(off) {
+                            eprintln!("video: {e}");
+                        }
                         None
                     }
-                    Some(Gesture::Pinch) => {
+                    Some(Gesture::Pinch) if pinch => {
                         let zoom = session.zoom.lock().unwrap();
                         Some(if zoom.enabled {
                             "zoom off".to_owned()
@@ -932,7 +1452,7 @@ pub fn run(
                             format!("zoom {:.2}", zoom.framing.amount)
                         })
                     }
-                    None => None,
+                    _ => None,
                 };
                 if let Some(c) = command
                     && let Err(e) = session.command(&c)
@@ -954,34 +1474,67 @@ pub fn run(
     println!("running");
 
     let mut result = Ok(());
-    let mut last_temperature = Instant::now() - TEMPERATURE_PERIOD;
+    // Asked off the main loop: a camera that does not answer would hold up the control socket.
+    let dev = Arc::new(dev);
+    let done = Arc::new(AtomicBool::new(false));
+    let temperature = {
+        let (dev, session, done) = (dev.clone(), session.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut last = Instant::now() - TEMPERATURE_PERIOD;
+            while !done.load(Ordering::Relaxed) {
+                std::thread::sleep(POLL);
+                if last.elapsed() >= TEMPERATURE_PERIOD && !session.frozen.load(Ordering::Relaxed) {
+                    last = Instant::now();
+                    let t = dev.call("getChipTemperature", vec![]).ok().and_then(|v| match v {
+                        opal_dai::msgpack::Value::Map(m) => m.get("average").and_then(|a| match a {
+                            opal_dai::msgpack::Value::F32(f) => Some(*f),
+                            opal_dai::msgpack::Value::F64(f) => Some(*f as f32),
+                            _ => None,
+                        }),
+                        _ => None,
+                    });
+                    *session.temperature.lock().unwrap() = t;
+                }
+            }
+        })
+    };
+    let lock_session = display_session();
+    let mut last_lock = Instant::now() - LOCK_PERIOD;
     while !TERMINATE.load(Ordering::Relaxed) && !RESTART.load(Ordering::Relaxed) {
-        if !session.alive.load(Ordering::Relaxed) {
+        // A camera that stopped answering is kept until video is wanted (see `update`).
+        if !session.alive.load(Ordering::Relaxed) && !session.frozen.load(Ordering::Relaxed) {
             result = Err(anyhow!("camera disconnected"));
             break;
         }
-        if last_temperature.elapsed() >= TEMPERATURE_PERIOD {
-            last_temperature = Instant::now();
-            let t = dev.call("getChipTemperature", vec![]).ok().and_then(|v| match v {
-                opal_dai::msgpack::Value::Map(m) => m.get("average").and_then(|a| match a {
-                    opal_dai::msgpack::Value::F32(f) => Some(*f),
-                    opal_dai::msgpack::Value::F64(f) => Some(*f as f32),
-                    _ => None,
-                }),
-                _ => None,
-            });
-            *session.temperature.lock().unwrap() = t;
+        if session.link.quiet_for() > SILENCE && !session.frozen.swap(true, Ordering::Relaxed) {
+            eprintln!("camera stopped responding; it is rebooted when video is next wanted");
+            // Closing the link makes every write to the camera fail at once instead of waiting forever.
+            session.link.close("camera stopped responding");
         }
-        let consumers = if low_power {
+        if let Some(id) = &lock_session
+            && last_lock.elapsed() >= LOCK_PERIOD
+        {
+            last_lock = Instant::now();
+            if let Some(locked) = screen_locked(id) {
+                session.locked.store(locked, Ordering::Relaxed);
+            }
+        }
+        let apps = if low_power {
             let mut node = session.camera_node.lock().unwrap();
             if node.as_ref().is_none_or(|n| !n.exists()) {
                 *node = find_camera_node();
             }
-            Some(node.as_deref().map_or(0, count_consumers))
+            Some(node.as_deref().map_or_else(Vec::new, consumers))
         } else {
-            output.as_deref().map(count_consumers)
+            output.as_deref().map(consumers)
         };
-        if let Err(e) = session.update(consumers) {
+        let count = apps.as_ref().map(Vec::len);
+        if let Some(mut apps) = apps {
+            apps.sort();
+            apps.dedup();
+            session.state.lock().unwrap().apps = apps;
+        }
+        if let Err(e) = session.update(count) {
             result = Err(e);
             break;
         }
@@ -1000,6 +1553,8 @@ pub fn run(
         }
         std::thread::sleep(POLL);
     }
+    done.store(true, Ordering::Relaxed);
+    let _ = temperature.join();
     let _ = std::fs::remove_file(&socket);
     if session.alive.load(Ordering::Relaxed) {
         let mut st = session.state.lock().unwrap();
@@ -1020,6 +1575,11 @@ pub fn send(words: &[String]) -> Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut words = words.to_vec();
     // Paths are resolved by the daemon, which runs in another directory.
+    if let [cmd, add, kind, _, _, _, _, path] = words.as_mut_slice()
+        && (cmd.as_str(), add.as_str(), kind.as_str()) == ("sticker", "add", "picture")
+    {
+        *path = std::path::absolute(&*path)?.display().to_string();
+    }
     if let [cmd, path, ..] = words.as_mut_slice()
         && matches!(cmd.as_str(), "lut" | "snap" | "background")
         && path != "off"
@@ -1040,6 +1600,14 @@ pub fn send(words: &[String]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn centre_crop_is_centred() {
+        let r = centre_crop(1920, 1080, 2.0);
+        assert_eq!((r.x, r.y, r.width, r.height), (480.0, 270.0, 960.0, 540.0));
+        let r = centre_crop(1280, 720, 1.0);
+        assert_eq!((r.x, r.y, r.width, r.height), (0.0, 0.0, 1280.0, 720.0));
+    }
 
     #[test]
     fn antibanding_commands() {

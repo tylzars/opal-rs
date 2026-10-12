@@ -16,6 +16,34 @@ const CAMERA: &[&str] = &[
     "sharpness",
 ];
 
+/// Settings a preset holds, with the command that puts each back to normal.
+const PRESET: &[(&str, &str)] = &[
+    ("ev", "ev 0"),
+    ("wb", "awb"),
+    ("brightness", "brightness 0"),
+    ("contrast", "contrast 0"),
+    ("saturation", "saturation 0"),
+    ("sharpness", "sharpness 1"),
+    ("blur", "blur 0"),
+    ("bokeh", "bokeh soft"),
+    ("background", "background off"),
+    ("lut", "lut off"),
+    ("zoom", "zoom off"),
+    ("magnify", "magnify off"),
+    ("pixelate", "pixelate off"),
+    ("touchup", "touchup off"),
+    ("tone", "tone off"),
+    ("tracking", "tracking normal"),
+    ("warmth", "warmth 0"),
+    ("tint", "tint 0"),
+    ("shadows", "shadows 0"),
+    ("highlights", "highlights 0"),
+    ("vibrance", "vibrance 0"),
+];
+
+/// Colour adjustment groups, cleared by `adjust reset`.
+const ADJUSTMENTS: &[&str] = &["warmth", "tint", "shadows", "highlights", "vibrance"];
+
 pub fn default_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -36,19 +64,81 @@ fn group(command: &str) -> Option<&'static str> {
         "contrast" => "contrast",
         "saturation" => "saturation",
         "sharpness" => "sharpness",
+        "adjust" => "adjust",
         "antibanding" => "antibanding",
         "gain" => "gain",
         "mic" => "mic",
         "blur" => "blur",
+        "bokeh" => "bokeh",
         "lut" => "lut",
         "background" => "background",
         "zoom" => "zoom",
+        "warmth" => "warmth",
+        "tint" => "tint",
+        "shadows" => "shadows",
+        "highlights" => "highlights",
+        "vibrance" => "vibrance",
+        "colour" => {
+            let name = command.split_whitespace().nth(1)?;
+            opal_effects::COLOURS.iter().find(|(n, _)| *n == name)?.0
+        }
+        "magnify" => "magnify",
+        "pixelate" => "pixelate",
+        "touchup" => "touchup",
+        "tone" => "tone",
         "tracking" => "tracking",
         "resolution" => "resolution",
         "gestures" => "gestures",
+        "gesture" => match command.split_whitespace().nth(1)? {
+            "peace" => "gesture peace",
+            "pinch" => "gesture pinch",
+            _ => return None,
+        },
         "power" => "power",
+        "lockpause" => "lockpause",
         _ => return None,
     })
+}
+
+fn in_preset(group: &str) -> bool {
+    PRESET.iter().any(|(g, _)| *g == group) || opal_effects::COLOURS.iter().any(|(n, _)| *n == group)
+}
+
+/// An adjustment set back to zero, which needs no line of its own.
+fn is_neutral_adjustment(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let zero = |w: &[&str]| w.iter().all(|v| v.parse::<f32>() == Ok(0.0));
+    match words.as_slice() {
+        [name, rest @ ..] if ADJUSTMENTS.contains(name) => rest.len() == 1 && zero(rest),
+        ["colour", _, rest @ ..] => rest.len() == 3 && zero(rest),
+        _ => false,
+    }
+}
+
+/// The commands that load a preset: its own, then a reset for every preset setting it leaves out.
+pub fn preset_commands(text: &str) -> Vec<String> {
+    let own: Vec<(&str, &str)> = text
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| Some((group(l)?, l)))
+        .filter(|(g, _)| in_preset(g))
+        .collect();
+    let mut out: Vec<String> = own.iter().map(|(_, c)| (*c).to_owned()).collect();
+    let has = |g: &str| own.iter().any(|(o, _)| *o == g);
+    out.extend(PRESET.iter().filter(|(g, _)| !has(g)).map(|(_, c)| (*c).to_owned()));
+    out.extend(
+        opal_effects::COLOURS
+            .iter()
+            .filter(|(n, _)| !has(n))
+            .map(|(n, _)| format!("colour {n} 0 0 0")),
+    );
+    out
+}
+
+/// A preset name: letters, digits, dashes and underscores.
+pub fn preset_name(name: &str) -> Option<&str> {
+    (!name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .then_some(name)
 }
 
 pub struct Settings {
@@ -76,8 +166,14 @@ impl Settings {
         let Some(g) = group(command) else {
             return Ok(());
         };
-        if command.split_whitespace().eq(["lut", "off"]) || command.split_whitespace().eq(["background", "off"]) {
+        if command.split_whitespace().eq(["lut", "off"])
+            || command.split_whitespace().eq(["background", "off"])
+            || is_neutral_adjustment(command)
+        {
             self.commands.remove(g);
+        } else if g == "adjust" {
+            self.commands
+                .retain(|k, _| !ADJUSTMENTS.contains(k) && !opal_effects::COLOURS.iter().any(|(n, _)| n == k));
         } else {
             self.commands
                 .insert(g, command.split_whitespace().collect::<Vec<_>>().join(" "));
@@ -122,6 +218,25 @@ impl Settings {
         self.commands.values().map(String::as_str)
     }
 
+    /// Where presets are kept: a `presets` folder next to the settings file.
+    pub fn preset_dir(&self) -> PathBuf {
+        self.path.with_file_name("presets")
+    }
+
+    /// The stickers file, next to the settings file.
+    pub fn stickers_path(&self) -> PathBuf {
+        self.path.with_file_name("stickers")
+    }
+
+    /// The current settings that belong in a preset, one command per line.
+    pub fn preset_text(&self) -> String {
+        self.commands
+            .iter()
+            .filter(|(g, _)| in_preset(g))
+            .map(|(_, c)| format!("{c}\n"))
+            .collect()
+    }
+
     pub fn camera_commands(&self) -> impl Iterator<Item = &str> {
         self.commands
             .iter()
@@ -147,6 +262,52 @@ mod tests {
         let s = Settings::load(&path);
         assert_eq!(s.commands().collect::<Vec<_>>(), ["blur 24", "af"]);
         assert_eq!(s.camera_commands().collect::<Vec<_>>(), ["af"]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn presets_hold_looks_and_reset_the_rest() {
+        let path = std::env::temp_dir().join(format!("opal-rs-settings-preset-{}", std::process::id()));
+        let mut s = Settings::load(&path);
+        s.record("blur 24").unwrap();
+        s.record("focus 120").unwrap();
+        s.record("colour blue 0 -50 0").unwrap();
+        s.record("resolution 1440p").unwrap();
+        let text = s.preset_text();
+        assert_eq!(text, "colour blue 0 -50 0\nblur 24\n");
+        let cmds = preset_commands(&text);
+        assert_eq!(&cmds[..2], ["colour blue 0 -50 0", "blur 24"]);
+        assert!(cmds.contains(&"lut off".to_owned()));
+        assert!(cmds.contains(&"colour red 0 0 0".to_owned()));
+        assert!(!cmds.contains(&"blur 0".to_owned()));
+        assert!(!cmds.contains(&"colour blue 0 0 0".to_owned()));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.starts_with("focus") || c.starts_with("resolution"))
+        );
+        assert_eq!(preset_name("Meeting_1"), Some("Meeting_1"));
+        assert_eq!(preset_name("../x"), None);
+        assert_eq!(preset_name(""), None);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn adjust_reset_clears_adjustments() {
+        let path = std::env::temp_dir().join(format!("opal-rs-settings-adjust-{}", std::process::id()));
+        let mut s = Settings::load(&path);
+        s.record("warmth 20").unwrap();
+        s.record("colour blue 0 -50 0").unwrap();
+        s.record("colour red 10 0 0").unwrap();
+        s.record("colour red 30 0 0").unwrap();
+        s.record("blur 24").unwrap();
+        assert_eq!(s.commands().count(), 4);
+        assert!(s.commands().any(|c| c == "colour red 30 0 0"));
+        s.record("colour red 0 0 0").unwrap();
+        s.record("warmth 0").unwrap();
+        assert_eq!(s.commands().collect::<Vec<_>>(), ["colour blue 0 -50 0", "blur 24"]);
+        s.record("adjust reset").unwrap();
+        assert_eq!(s.commands().collect::<Vec<_>>(), ["blur 24"]);
         std::fs::remove_file(&path).unwrap();
     }
 }

@@ -13,14 +13,24 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 ## What it does
 - Boots the camera's firmware from RAM and runs it as a webcam: video goes to a virtual camera
   ("Opal C1 Virtual", via `v4l2loopback`), the microphone appears as a normal USB microphone.
-- Streams only while an app uses the camera; the status LED is white while it streams.
-- Focus, exposure, white balance, light flicker (50/60 Hz), image adjustments, microphone gain and mute.
-- Background blur or a background picture, using person segmentation running on the camera.
+- Streams only while an app uses the camera; the status LED is white while it streams, and blue while your video
+  is off but the camera still watches for gestures.
+- Focus, exposure, white balance, light flicker (50/60 Hz), image adjustments, zoom, microphone gain and mute.
+- Background blur or a background picture, using person segmentation running on the camera; pixelate.
+- Stickers: text, a name card, a clock, a timer or your own pictures, which can sit behind you or follow your face.
+- Loop: record a few seconds and play them in place of your live video.
+- Touch up: smoother skin, even skin tone and skin warmth.
+- Lighting and colour: temperature, tint, shadows, highlights, vibrance, and hue, strength and lightness of eight
+  colours. A white picker sets temperature and tint from something grey in the picture.
 - Colour looks: ten built in (black and white, faded, vivid, warm, cool and more), or your own Adobe `.cube` files.
 - Face framing: the picture follows your face, using face detection running on the camera.
-- Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off.
+- Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off; each
+  can be switched off on its own.
 - Low power mode: the camera works as an ordinary webcam with no effects, so your computer does less work.
 - On a USB 2 port the video drops to 720p, as the official app does.
+- Zebra stripes and a histogram in the control panel's preview.
+- Presets: save a look with its lighting and effects under a name and switch between them.
+- Shows a camera-off picture while your video is off, and turns the camera off while the screen is locked.
 - A tray icon shows when the camera is on and turns the video on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
 

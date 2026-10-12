@@ -1,6 +1,7 @@
 //! Control panel for the opal-rs camera service.
 
 mod debug;
+mod overlay;
 mod preview;
 mod theme;
 mod view;
@@ -31,7 +32,7 @@ fn socket_path() -> PathBuf {
 }
 
 /// Sends one command to the service and returns its reply.
-fn send(command: &str) -> Result<String, String> {
+pub(crate) fn send(command: &str) -> Result<String, String> {
     let mut s = UnixStream::connect(socket_path()).map_err(|_| "the opal-rs service is not running".to_owned())?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
     writeln!(s, "{command}").map_err(|e| e.to_string())?;
@@ -44,6 +45,8 @@ fn send(command: &str) -> Result<String, String> {
     }
 }
 
+/// Lighting adjustment commands, in the order of `Controls::lighting`.
+pub const LIGHTING: [&str; 5] = ["warmth", "tint", "shadows", "highlights", "vibrance"];
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Auto,
@@ -78,9 +81,24 @@ struct Controls {
     zoom_amount: f32,
     tracking: String,
     gestures: bool,
+    peace: bool,
+    pinch: bool,
+    lock_pause: bool,
     low_power: bool,
     resolution: String,
     antibanding: String,
+    magnify: f32,
+    /// Pixelation, 0 for off to 100.
+    pixelate: i32,
+    /// Lens (hexagonal) background blur instead of the smooth one.
+    lens: bool,
+    /// Skin smoothing, even tone (0 to 100) and skin warmth (-100 to 100).
+    touchup: i32,
+    tone: [i32; 2],
+    /// Warmth, tint, shadows, highlights and vibrance, -100 to 100.
+    lighting: [i32; 5],
+    /// Hue, saturation and lightness change per colour, -100 to 100.
+    colours: [[i32; 3]; 8],
 }
 
 impl Default for Controls {
@@ -111,9 +129,19 @@ impl Default for Controls {
             zoom_amount: 0.5,
             tracking: "normal".into(),
             gestures: false,
+            peace: true,
+            pinch: true,
+            lock_pause: true,
             low_power: false,
             resolution: "1080p".into(),
             antibanding: "auto".into(),
+            magnify: 1.0,
+            pixelate: 0,
+            lens: false,
+            touchup: 0,
+            tone: [0, 0],
+            lighting: [0; 5],
+            colours: [[0; 3]; 8],
         }
     }
 }
@@ -157,9 +185,30 @@ impl Controls {
                 ["zoom", a] => (c.zoom, c.zoom_amount) = (true, a.parse().unwrap_or(0.5)),
                 ["tracking", s] => c.tracking = (*s).to_owned(),
                 ["gestures", g] => c.gestures = *g == "on",
+                ["gesture", "peace", g] => c.peace = *g == "on",
+                ["gesture", "pinch", g] => c.pinch = *g == "on",
+                ["lockpause", v] => c.lock_pause = *v == "on",
                 ["power", p] => c.low_power = *p == "low",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
                 ["antibanding", a] => c.antibanding = (*a).to_owned(),
+                ["magnify", "off"] => c.magnify = 1.0,
+                ["pixelate", "off"] => c.pixelate = 0,
+                ["bokeh", style] => c.lens = *style == "lens",
+                ["touchup", "off"] => c.touchup = 0,
+                ["touchup", t] => c.touchup = t.parse().unwrap_or(0),
+                ["tone", "off"] => c.tone = [0, 0],
+                ["tone", _, _] => c.tone = [int(1).unwrap_or(0), int(2).unwrap_or(0)],
+                ["pixelate", p] => c.pixelate = p.parse().unwrap_or(0),
+                ["magnify", m] => c.magnify = m.parse().unwrap_or(1.0),
+                [name, v] if LIGHTING.contains(name) => {
+                    let i = LIGHTING.iter().position(|n| n == name).unwrap();
+                    c.lighting[i] = v.parse().unwrap_or(0);
+                }
+                ["colour", name, _, _, _] => {
+                    if let Some(i) = opal_effects::COLOURS.iter().position(|(n, _)| n == name) {
+                        c.colours[i] = [int(2).unwrap_or(0), int(3).unwrap_or(0), int(4).unwrap_or(0)];
+                    }
+                }
                 _ => {}
             }
         }
@@ -188,7 +237,7 @@ impl Controls {
 }
 
 /// Controls from the service's saved settings, and an error if it could not be asked.
-fn load_settings() -> (Controls, String) {
+pub(crate) fn load_settings() -> (Controls, String) {
     match send("settings") {
         Ok(s) if s != "ok" => (Controls::from_settings(&s), String::new()),
         Ok(_) => (Controls::default(), String::new()),
@@ -197,15 +246,42 @@ fn load_settings() -> (Controls, String) {
 }
 
 /// Asks the service for its status once a second.
-fn poll_status_thread(ctx: egui::Context) -> Arc<Mutex<Option<String>>> {
+/// Saved presets and stickers as the service lists them, read in the background.
+#[derive(Default)]
+pub(crate) struct Lists {
+    pub presets: String,
+    pub stickers: String,
+    /// Set by the window to ask for a fresh read; cleared once read.
+    pub stale: bool,
+    /// Bumped on every read, so the window knows to take the new lists.
+    pub serial: u64,
+}
+
+/// Asks the service for its status once a second, and for the preset and sticker lists every few seconds or
+/// when asked, so a slow service never stalls the window.
+fn poll_status_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Arc<Mutex<Option<String>>> {
     let slot: Arc<Mutex<Option<String>>> = Arc::default();
     let out = slot.clone();
     std::thread::spawn(move || {
+        let mut tick = 0u32;
         loop {
             let status = send("status").unwrap_or_else(|e| e);
             *slot.lock().unwrap() = Some(status);
+            if tick.is_multiple_of(3) || lists.lock().unwrap().stale {
+                let presets = send("preset list").unwrap_or_default();
+                let stickers = send("sticker list").unwrap_or_default();
+                let mut l = lists.lock().unwrap();
+                (l.presets, l.stickers, l.stale) = (presets, stickers, false);
+                l.serial += 1;
+            }
             ctx.request_repaint();
-            std::thread::sleep(Duration::from_secs(1));
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(100));
+                if lists.lock().unwrap().stale {
+                    break;
+                }
+            }
+            tick += 1;
         }
     });
     out
@@ -218,6 +294,7 @@ struct App {
     message: String,
     /// Newest status line, filled by a polling thread so a slow service never stalls the window.
     latest: Arc<Mutex<Option<String>>>,
+    lists: Arc<Mutex<Lists>>,
     preview: preview::Handle,
     /// Keep the preview running, restarting it after errors.
     want_preview: bool,
@@ -226,6 +303,12 @@ struct App {
     view: view::State,
     /// The service answered the last status request.
     connected: bool,
+    /// Preview aids, saved by the panel itself.
+    zebra: bool,
+    histogram: bool,
+    bins: Option<[u32; overlay::BINS]>,
+    /// The newest preview frame as shown, before zebra stripes, for the white picker.
+    frame: Option<(Vec<u8>, [usize; 2])>,
 }
 
 impl App {
@@ -234,18 +317,25 @@ impl App {
         let (c, message) = load_settings();
         let connected = message.is_empty();
         let view = view::State::new(&c);
+        let (zebra, histogram) = overlay::load();
+        let lists: Arc<Mutex<Lists>> = Arc::default();
         Self {
             c,
             mode: Mode::Auto,
             status: String::new(),
             message,
-            latest: poll_status_thread(cc.egui_ctx.clone()),
+            latest: poll_status_thread(cc.egui_ctx.clone(), lists.clone()),
+            lists,
             preview: preview::Handle::default(),
             want_preview: !debug,
             texture: None,
             debug,
             view,
             connected,
+            zebra,
+            histogram,
+            bins: None,
+            frame: None,
         }
     }
 
@@ -275,7 +365,14 @@ impl App {
 
     /// Moves the newest frame into the preview texture.
     fn update_texture(&mut self, ctx: &egui::Context) {
-        if let Some((rgb, size)) = self.preview.take_frame() {
+        if let Some((mut rgb, size)) = self.preview.take_frame() {
+            self.bins = self.histogram.then(|| overlay::histogram(&rgb));
+            if self.view.picking_white {
+                self.frame = Some((rgb.clone(), size));
+            }
+            if self.zebra {
+                overlay::zebra(&mut rgb, size);
+            }
             let image = egui::ColorImage::from_rgb(size, &rgb);
             match &mut self.texture {
                 Some(t) => t.set(image, egui::TextureOptions::LINEAR),

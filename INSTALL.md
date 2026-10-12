@@ -46,18 +46,40 @@
    opal-rs ctl gain 20        # microphone gain in dB
    opal-rs ctl mic off        # mute the microphone; mic on turns it back on
    opal-rs ctl blur 24        # blur the background, radius in pixels; blur 0 turns it off
+   opal-rs ctl bokeh lens     # lens look for the blur, bright lights become soft shapes; bokeh soft goes back
    opal-rs ctl background ~/Pictures/beach.jpg   # show a picture behind you instead; background off removes it
    opal-rs ctl lut noir 0.8   # colour look at 80%: mono, noir, tonal, fade, chrome, instant, process, transfer, warm or cool
    opal-rs ctl lut ~/looks/film.cube   # or a look from an Adobe .cube file; lut off removes it
+   opal-rs ctl warmth 30      # warmer picture, -100 to 100; also tint, shadows, highlights and vibrance
+   opal-rs ctl colour blue 0 -40 0   # one colour's hue, strength and lightness, -100 to 100 each
+   opal-rs ctl adjust reset   # undo all of the above
+   opal-rs ctl sticker add text 0.5 0.9 0.08 - white Back in 5 minutes
+   opal-rs ctl sticker add card 0.25 0.84 0.14 - Your Name | Your title
+   opal-rs ctl sticker add clock 0.9 0.07 0.06 - white   # also timer, and picture <file>
+   opal-rs ctl loop record    # record up to 10 s; loop stop ends it, loop play (or bounce) shows it, loop off goes live
+   opal-rs ctl preset save evening   # keep the current look, lighting and effects; preset load evening brings them back
    opal-rs ctl zoom 0.5       # keep your face framed, 0 loose to 1 tight; zoom off turns it off
    opal-rs ctl tracking slow  # how fast framing follows: slow, normal or fast
+   opal-rs ctl magnify 1.5    # zoom into the middle, 1 to 4; magnify off goes back
+   opal-rs ctl pixelate 40    # big square pixels, 1 to 100; pixelate off goes back
+   opal-rs ctl touchup 50     # smoother skin, 0 to 100
+   opal-rs ctl tone 40 10     # even out skin colour (0 to 100) and warm it (-100 to 100); tone off goes back
    opal-rs ctl gestures on    # hand gestures: a peace sign turns the video off and on, a pinch turns framing on and off
+   opal-rs ctl gesture pinch off   # turn one gesture off (peace or pinch); gesture pinch on turns it back on
    opal-rs ctl resolution 1440p   # 720p, 1080p (default) or 1440p; restarts the camera
    opal-rs ctl power low      # low power mode, see below; power normal goes back; restarts the camera
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.
-   Focus, exposure, white balance, flicker, image adjustments, microphone gain and mute, blur, background, colour look, framing,
+   The camera also turns off while your screen is locked; `opal-rs ctl lockpause off` keeps it running.
+   Focus, exposure, white balance, flicker, image adjustments, microphone gain and mute, blur, background, colour look, lighting and colour changes, zoom, pixelate, touch up, skin tone, framing,
    gestures, resolution and low power mode are saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
+   Stickers are placed by their centre, across and down as fractions of the picture, with their height as a
+   fraction too. After the size comes `-`, or `b` to put the sticker behind you, `f` to have it follow your face
+   (then across and down are around your face), or `bf`. `sticker list` shows them with their numbers;
+   `sticker move <n> <across> <down> <size>`, `sticker flags <n> <b|f|bf|->`, `sticker remove <n>` and
+   `sticker clear` change them. They are kept in `~/.config/opal-rs/stickers` and saved with presets.
+   Presets are plain files in `~/.config/opal-rs/presets`; copy one there to import it. `preset list` and
+   `preset delete <name>` manage them.
 
    In low power mode the camera sends 1080p video straight to your apps like an ordinary webcam, so your computer
    does less work, but there are no effects (blur, background, looks, framing, gestures). Pick "Opal C1" in your

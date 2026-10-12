@@ -1,6 +1,7 @@
 mod daemon;
 mod mains;
 mod settings;
+mod stickers;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -133,7 +134,10 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     let resolution = if low_power {
         opal_c1::Resolution::P1080
     } else if slow_usb && settings.resolution() != opal_c1::Resolution::P720 {
-        println!("camera is on a USB {} port, using 720p; plug it into a USB 3 port for more", info.usb);
+        println!(
+            "camera is on a USB {} port, using 720p; plug it into a USB 3 port for more",
+            info.usb
+        );
         opal_c1::Resolution::P720
     } else {
         settings.resolution()
@@ -143,7 +147,9 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
         resolution.name(),
         if low_power { " low power" } else { "" }
     );
-    daemon::run(dev, dir, &sensor, resolution, low_power, output, settings, overrides, info)
+    daemon::run(
+        dev, dir, &sensor, resolution, low_power, output, settings, overrides, info,
+    )
 }
 
 fn device_info(dev: &Device) -> daemon::DeviceInfo {

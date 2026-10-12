@@ -80,7 +80,10 @@ pub fn mode(setting: &str) -> Option<u8> {
         "off" => antibanding::OFF,
         "50" => antibanding::HZ_50,
         "60" => antibanding::HZ_60,
-        "auto" => match local_zone().filter(|z| z.contains('/') && !z.starts_with("Etc/")).map_or(60, |z| hz_for_zone(&z)) {
+        "auto" => match local_zone()
+            .filter(|z| z.contains('/') && !z.starts_with("Etc/"))
+            .map_or(60, |z| hz_for_zone(&z))
+        {
             50 => antibanding::HZ_50,
             _ => antibanding::HZ_60,
         },

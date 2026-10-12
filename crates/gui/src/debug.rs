@@ -230,6 +230,46 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
             }
         });
 
+        for (name, value) in crate::LIGHTING.iter().zip(c.lighting.iter_mut()) {
+            let s = ui.add(egui::Slider::new(value, -100..=100).text(*name));
+            if s.drag_stopped() || (s.changed() && !s.dragged()) {
+                cmds.push(format!("{name} {value}"));
+            }
+        }
+        for ((name, _), v) in opal_effects::COLOURS.iter().zip(c.colours.iter_mut()) {
+            ui.horizontal(|ui| {
+                ui.label(*name);
+                let mut done = false;
+                for x in v.iter_mut() {
+                    let s = ui.add(egui::DragValue::new(x).range(-100..=100));
+                    done |= s.drag_stopped() || (s.changed() && !s.dragged());
+                }
+                if done {
+                    cmds.push(format!("colour {name} {} {} {}", v[0], v[1], v[2]));
+                }
+            });
+        }
+        if ui.button("Reset lighting and colours").clicked() {
+            (c.lighting, c.colours) = ([0; 5], [[0; 3]; 8]);
+            cmds.push("adjust reset".into());
+        }
+        let s = ui.add(egui::Slider::new(&mut c.touchup, 0..=100).text("Touch up"));
+        if s.drag_stopped() || (s.changed() && !s.dragged()) {
+            cmds.push(format!("touchup {}", c.touchup));
+        }
+        let a = ui.add(egui::Slider::new(&mut c.tone[0], 0..=100).text("Even skin tone"));
+        let b = ui.add(egui::Slider::new(&mut c.tone[1], -100..=100).text("Skin warmth"));
+        if a.drag_stopped() || b.drag_stopped() || ((a.changed() || b.changed()) && !a.dragged() && !b.dragged()) {
+            cmds.push(format!("tone {} {}", c.tone[0], c.tone[1]));
+        }
+        let s = ui.add(egui::Slider::new(&mut c.pixelate, 0..=100).text("Pixelate"));
+        if s.drag_stopped() || (s.changed() && !s.dragged()) {
+            cmds.push(format!("pixelate {}", c.pixelate));
+        }
+        let s = ui.add(egui::Slider::new(&mut c.magnify, 1.0..=4.0).text("Zoom"));
+        if s.drag_stopped() || (s.changed() && !s.dragged()) {
+            cmds.push(format!("magnify {:.1}", c.magnify));
+        }
         if ui.checkbox(&mut c.zoom, "Follow my face").changed() {
             cmds.push(c.zoom_cmd());
         }
@@ -254,8 +294,14 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
             cmds.push(c.gestures_cmd());
         }
         ui.add_enabled_ui(c.gestures, |ui| {
-            ui.label("Peace sign: video off and on");
-            ui.label("Pinch: follow my face on and off");
+            for (name, label, on) in [
+                ("peace", "Peace sign: video off and on", &mut c.peace),
+                ("pinch", "Pinch: follow my face on and off", &mut c.pinch),
+            ] {
+                if ui.checkbox(on, label).changed() {
+                    cmds.push(format!("gesture {name} {}", if *on { "on" } else { "off" }));
+                }
+            }
         });
     });
 

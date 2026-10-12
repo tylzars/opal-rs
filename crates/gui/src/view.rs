@@ -1,5 +1,6 @@
 //! Main control panel: live preview with the settings grouped in tabs.
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Layout, Margin, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::theme::{self, ACCENT, AMBER, CARD, GREEN, LINE, PANEL, RAISED, RED, Slider, TEXT, WEAK, card, hint};
-use crate::{App, Controls, Mode, RESOLUTIONS};
+use crate::{App, Controls, LIGHTING, Mode, RESOLUTIONS};
 
 /// Width at which the settings move from below the preview to the side.
 const WIDE: f32 = 1100.0;
@@ -21,6 +22,58 @@ const TILE_GAP: f32 = 8.0;
 enum Pick {
     Background,
     Look,
+    Sticker,
+}
+
+/// A sticker as the service lists it.
+#[derive(Clone)]
+struct StickerRow {
+    id: String,
+    kind: String,
+    x: f32,
+    y: f32,
+    size: f32,
+    flags: String,
+    details: String,
+}
+
+impl StickerRow {
+    fn parse(line: &str) -> Option<Self> {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let [id, kind, x, y, size, flags, details @ ..] = w.as_slice() else {
+            return None;
+        };
+        Some(Self {
+            id: (*id).to_owned(),
+            kind: (*kind).to_owned(),
+            x: x.parse().ok()?,
+            y: y.parse().ok()?,
+            size: size.parse().ok()?,
+            flags: (*flags).to_owned(),
+            details: details.join(" "),
+        })
+    }
+
+    fn label(&self) -> String {
+        let what = match self.kind.as_str() {
+            "text" => self
+                .details
+                .split_once(' ')
+                .map_or(self.details.as_str(), |(_, t)| t)
+                .to_owned(),
+            "card" => self.details.split('|').next().unwrap_or("").trim().to_owned(),
+            "picture" => Path::new(&self.details)
+                .file_name()
+                .map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+            k => title_case(k),
+        };
+        match self.kind.as_str() {
+            "text" => format!("Text: {what}"),
+            "card" => format!("Name card: {what}"),
+            "picture" => format!("Picture: {what}"),
+            _ => what,
+        }
+    }
 }
 
 /// Colours of a tiny portrait: sky, wall, face, shirt.
@@ -54,6 +107,25 @@ pub struct State {
     can_browse: bool,
     /// Do not reopen the preview before this, while the camera restarts.
     hold: Option<Instant>,
+    /// The colour picked in the Colours card.
+    colour: usize,
+    /// The next click on the preview picks a white point.
+    pub picking_white: bool,
+    /// Saved presets, and the read of the lists they came from.
+    presets: Vec<String>,
+    lists_seen: u64,
+    preset_name: String,
+    stickers: Vec<StickerRow>,
+    /// The sticker being edited.
+    sticker: Option<String>,
+    new_kind: String,
+    new_text: String,
+    new_title: String,
+    new_colour: String,
+    new_picture: String,
+    /// The record button is held down.
+    loop_holding: bool,
+    loop_bounce: bool,
 }
 
 impl State {
@@ -85,6 +157,20 @@ impl State {
             picked: Arc::default(),
             can_browse,
             hold: None,
+            colour: 0,
+            picking_white: false,
+            presets: Vec::new(),
+            lists_seen: 0,
+            preset_name: String::new(),
+            stickers: Vec::new(),
+            sticker: None,
+            new_kind: "text".into(),
+            new_text: String::new(),
+            new_title: String::new(),
+            new_colour: "white".into(),
+            new_picture: String::new(),
+            loop_holding: false,
+            loop_bounce: false,
         }
     }
 
@@ -96,6 +182,7 @@ impl State {
                 "Pictures | *.jpg *.jpeg *.png *.JPG *.JPEG *.PNG",
             ),
             Pick::Look => ("Choose a look file", "Look files | *.cube *.CUBE"),
+            Pick::Sticker => ("Choose a picture", "Pictures | *.png *.jpg *.jpeg *.PNG *.JPG *.JPEG"),
         };
         let (slot, ctx) = (self.picked.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -129,6 +216,14 @@ fn signed(v: i32) -> String {
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
+    {
+        let l = app.lists.lock().unwrap();
+        if l.serial != app.view.lists_seen {
+            app.view.lists_seen = l.serial;
+            app.view.presets = l.presets.split_whitespace().map(str::to_owned).collect();
+            app.view.stickers = l.stickers.split("; ").filter_map(StickerRow::parse).collect();
+        }
+    }
     keep_preview(app, &ctx);
     app.update_texture(&ctx);
     let mut cmds = Vec::new();
@@ -140,6 +235,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 app.c.background_on = true;
                 cmds.push(format!("background {}", app.c.background));
             }
+            Pick::Sticker => app.view.new_picture = path,
             Pick::Look => {
                 app.view.look_file = path;
                 app.view.custom_look = true;
@@ -225,8 +321,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let restart = cmds
         .iter()
         .any(|c| c.starts_with("resolution ") || c.starts_with("power "));
+    let presets = cmds
+        .iter()
+        .any(|c| c.starts_with("preset ") || c.starts_with("sticker "));
+    let loaded = cmds.iter().any(|c| c.starts_with("preset load "));
     for cmd in cmds {
         app.apply(cmd);
+    }
+    if presets {
+        app.lists.lock().unwrap().stale = true;
+    }
+    if loaded {
+        // A preset changes many settings at once; show what the service has now.
+        app.c = crate::load_settings().0;
     }
     if restart {
         // Reopen once the camera is back, with the new size.
@@ -278,7 +385,7 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), size.y), Sense::hover());
     let rect = Rect::from_center_size(row.center(), size);
     let radius = CornerRadius::same(18);
-    let painter = ui.painter();
+    let painter = ui.painter().clone();
     painter.rect_filled(rect, radius, Color32::from_rgb(0x08, 0x09, 0x0b));
 
     let connected = app.status.starts_with("mode ");
@@ -289,6 +396,25 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
         egui::Image::new(t).corner_radius(radius).paint_at(ui, rect);
     }
     painter.rect_stroke(rect, radius, Stroke::new(1.0, LINE), egui::StrokeKind::Inside);
+    if app.view.picking_white && showing {
+        pick_white(app, ui, rect);
+    }
+    if let (Some(bins), true, true) = (app.bins, app.histogram, showing) {
+        let r = Rect::from_min_size(rect.left_bottom() + vec2(14.0, -78.0), vec2(170.0, 64.0));
+        painter.rect_filled(r, CornerRadius::same(8), Color32::from_black_alpha(150));
+        let inner = r.shrink(6.0);
+        let top = *bins.iter().max().unwrap_or(&1) as f32;
+        let bar = inner.width() / bins.len() as f32;
+        for (i, &n) in bins.iter().enumerate() {
+            let h = inner.height() * (n as f32 / top.max(1.0)).sqrt();
+            let x = inner.left() + i as f32 * bar;
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x, inner.bottom() - h), pos2(x + bar, inner.bottom())),
+                CornerRadius::ZERO,
+                Color32::from_white_alpha(170),
+            );
+        }
+    }
 
     let centre = |ui: &mut Ui, height: f32, add: &mut dyn FnMut(&mut Ui)| {
         let r = Rect::from_center_size(rect.center(), vec2(rect.width() - 40.0, height));
@@ -348,7 +474,23 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     } else {
         ("Idle", WEAK)
     };
-    theme::pill(ui, rect.min + vec2(14.0, 14.0), Align2::LEFT_TOP, Some(dot), text);
+    let r = theme::pill(ui, rect.min + vec2(14.0, 14.0), Align2::LEFT_TOP, Some(dot), text);
+    // Apps using the camera, other than this panel.
+    let apps: Vec<&str> = app
+        .status_value("apps")
+        .unwrap_or("-")
+        .split(',')
+        .filter(|a| *a != "-" && *a != "opal-rs-gui")
+        .collect();
+    if connected && !apps.is_empty() {
+        theme::pill(
+            ui,
+            r.right_top() + vec2(8.0, 0.0),
+            Align2::LEFT_TOP,
+            None,
+            &apps.join(", "),
+        );
+    }
     if connected {
         let mut right = rect.right_top() + vec2(-14.0, 14.0);
         if let Some(t) = app.status_value("temperature").and_then(|t| t.parse::<f32>().ok()) {
@@ -398,6 +540,7 @@ fn message(app: &mut App, ui: &mut Ui) {
 
 /// Every setting in one list, grouped like the camera's own app: camera, audio, effects, manual, settings.
 fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
+    let app_loop = app.status_value("loop").unwrap_or("off").to_owned();
     ui.spacing_mut().item_spacing.y = 10.0;
     if app.c.low_power {
         card(ui, "", |ui| {
@@ -417,6 +560,24 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     theme::section(ui, "Camera");
     ui.add_enabled_ui(enabled, |ui| {
         card(ui, "", |ui| {
+            ui.add_enabled_ui(!c.zoom, |ui| {
+                let text = if c.magnify > 1.0 {
+                    format!("{:.1}x", c.magnify)
+                } else {
+                    "Off".into()
+                };
+                if Slider::new("Zoom", &mut c.magnify, 1.0..=4.0, text)
+                    .step(0.1)
+                    .show(ui)
+                    .changed()
+                {
+                    cmds.push(if c.magnify > 1.0 {
+                        format!("magnify {:.1}", c.magnify)
+                    } else {
+                        "magnify off".into()
+                    });
+                }
+            });
             if theme::switch_row(ui, "Follow my face", "", &mut c.zoom) {
                 cmds.push(c.zoom_cmd());
             }
@@ -441,6 +602,11 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
         });
     });
 
+    presets(v, ui, cmds, enabled);
+    stickers(v, ui, cmds, enabled, &ctx);
+    let looping = app_loop.clone();
+    clip(v, ui, cmds, enabled, &looping);
+
     group(ui, "Effects");
     ui.add_enabled_ui(enabled, |ui| {
         card(ui, "", |ui| {
@@ -455,6 +621,53 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                 {
                     cmds.push(c.blur_cmd());
                 }
+                if theme::switch_row(
+                    ui,
+                    "Lens look",
+                    "Bright lights turn into soft shapes, as through a lens.",
+                    &mut c.lens,
+                ) {
+                    cmds.push(format!("bokeh {}", if c.lens { "lens" } else { "soft" }));
+                }
+            }
+        });
+
+        card(ui, "", |ui| {
+            let text = if c.touchup > 0 {
+                format!("{}%", c.touchup)
+            } else {
+                "Off".into()
+            };
+            if Slider::new("Touch up", &mut c.touchup, 0..=100, text)
+                .show(ui)
+                .changed()
+            {
+                cmds.push(format!("touchup {}", c.touchup));
+            }
+            let even = format!("{}%", c.tone[0]);
+            let a = Slider::new("Even skin tone", &mut c.tone[0], 0..=100, even).show(ui);
+            let warm = signed(c.tone[1]);
+            let b = Slider::new("Skin warmth", &mut c.tone[1], -100..=100, warm).show(ui);
+            if a.changed() || b.changed() {
+                cmds.push(format!("tone {} {}", c.tone[0], c.tone[1]));
+            }
+        });
+
+        card(ui, "", |ui| {
+            let text = if c.pixelate > 0 {
+                format!("{}%", c.pixelate)
+            } else {
+                "Off".into()
+            };
+            if Slider::new("Pixelate", &mut c.pixelate, 0..=100, text)
+                .show(ui)
+                .changed()
+            {
+                cmds.push(if c.pixelate > 0 {
+                    format!("pixelate {}", c.pixelate)
+                } else {
+                    "pixelate off".into()
+                });
             }
         });
 
@@ -557,6 +770,14 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                 cmds.push(c.gestures_cmd());
             }
             if c.gestures {
+                for (name, label, on) in [
+                    ("peace", "Peace sign turns the video off and on", &mut c.peace),
+                    ("pinch", "Pinch turns Follow my face on and off", &mut c.pinch),
+                ] {
+                    if theme::switch_row(ui, label, "", on) {
+                        cmds.push(format!("gesture {name} {}", if *on { "on" } else { "off" }));
+                    }
+                }
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                     ui.painter()
@@ -570,6 +791,25 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                 });
             }
         });
+    });
+    card(ui, "", |ui| {
+        let (mut zebra, mut histogram) = (app.zebra, app.histogram);
+        let a = theme::switch_row(
+            ui,
+            "Zebra stripes",
+            "Marks parts of the preview that are too bright.",
+            &mut zebra,
+        );
+        let b = theme::switch_row(
+            ui,
+            "Histogram",
+            "Shows how bright the picture is, dark on the left.",
+            &mut histogram,
+        );
+        if a || b {
+            (app.zebra, app.histogram) = (zebra, histogram);
+            crate::overlay::save(zebra, histogram);
+        }
     });
     device(app, ui, cmds);
     if link_card(ui, "Help", Arrow::Right) {
@@ -856,6 +1096,9 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                 .into(),
             );
         }
+        if theme::switch_row(ui, "Off while the screen is locked", "", &mut c.lock_pause) {
+            cmds.push(format!("lockpause {}", if c.lock_pause { "on" } else { "off" }));
+        }
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
@@ -971,18 +1214,363 @@ fn manual(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             }
         }
     });
+    lighting(app, ui, cmds);
+}
+
+/// While picking: a crosshair over the preview, and a click sets temperature and tint so that spot turns grey.
+fn pick_white(app: &mut App, ui: &mut Ui, rect: Rect) {
+    let resp = ui.interact(rect, ui.id().with("pick white"), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::Crosshair);
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.view.picking_white = false;
+        return;
+    }
+    let (Some(pos), true) = (resp.interact_pointer_pos(), resp.clicked()) else {
+        return;
+    };
+    let Some((rgb, [w, h])) = &app.frame else {
+        return;
+    };
+    let u = (pos - rect.min) / rect.size();
+    let (cx, cy) = ((u.x * *w as f32) as usize, (u.y * *h as f32) as usize);
+    let mut sum = [0f32; 3];
+    let mut n = 0.0;
+    for y in cy.saturating_sub(2)..(cy + 3).min(*h) {
+        for x in cx.saturating_sub(2)..(cx + 3).min(*w) {
+            for (c, s) in sum.iter_mut().enumerate() {
+                *s += rgb[(y * w + x) * 3 + c] as f32;
+            }
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        return;
+    }
+    let l = &mut app.c.lighting;
+    let (t, k) = opal_effects::neutralise(sum.map(|s| s / n), l[0] as f32 / 100.0, l[1] as f32 / 100.0);
+    (l[0], l[1]) = ((t * 100.0).round() as i32, (k * 100.0).round() as i32);
+    let cmds = [format!("warmth {}", l[0]), format!("tint {}", l[1])];
+    app.view.picking_white = false;
+    for c in cmds {
+        app.apply(c);
+    }
+}
+
+/// Loop: hold the button to record a few seconds, which then play instead of the live video.
+fn clip(v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>, enabled: bool, state: &str) {
+    group(ui, "Loop");
+    ui.add_enabled_ui(enabled, |ui| {
+        card(ui, "", |ui| {
+            let playing = state.starts_with("playing") || state.starts_with("bounce");
+            let label = if v.loop_holding {
+                "Recording..."
+            } else {
+                "Hold to record"
+            };
+            let resp = ui.add(egui::Button::new(label).min_size(vec2(ui.available_width(), 34.0)));
+            let down = resp.is_pointer_button_down_on();
+            if down && !v.loop_holding {
+                v.loop_holding = true;
+                cmds.push("loop record".into());
+            } else if !down && v.loop_holding {
+                v.loop_holding = false;
+                cmds.push("loop stop".into());
+                cmds.push(format!("loop {}", if v.loop_bounce { "bounce" } else { "play" }));
+            }
+            if theme::switch_row(
+                ui,
+                "Bounce",
+                "Plays forwards then backwards instead of starting over.",
+                &mut v.loop_bounce,
+            ) && playing
+            {
+                cmds.push(format!("loop {}", if v.loop_bounce { "bounce" } else { "play" }));
+            }
+            if playing && ui.button("Back to live video").clicked() {
+                cmds.push("loop off".into());
+            }
+        });
+    });
+}
+
+/// Stickers over the video: a list to edit and remove them, and a form to add one.
+fn stickers(v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>, enabled: bool, ctx: &egui::Context) {
+    group(ui, "Stickers");
+    ui.add_enabled_ui(enabled, |ui| {
+        card(ui, "", |ui| {
+            let mut remove = None;
+            for row in &mut v.stickers {
+                let open = v.sticker.as_deref() == Some(row.id.as_str());
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(open, row.label()).clicked() {
+                        v.sticker = if open { None } else { Some(row.id.clone()) };
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("Remove").clicked() {
+                            remove = Some(row.id.clone());
+                        }
+                    });
+                });
+                if open {
+                    let mut moved = false;
+                    let pct = |v: f32| format!("{:.0}%", v * 100.0);
+                    let (x, y, size) = (pct(row.x), pct(row.y), pct(row.size));
+                    moved |= Slider::new("Across", &mut row.x, 0.0..=1.0, x).show(ui).changed();
+                    moved |= Slider::new("Down", &mut row.y, 0.0..=1.0, y).show(ui).changed();
+                    moved |= Slider::new("Size", &mut row.size, 0.02..=0.5, size).show(ui).changed();
+                    if moved {
+                        cmds.push(format!(
+                            "sticker move {} {:.3} {:.3} {:.3}",
+                            row.id, row.x, row.y, row.size
+                        ));
+                    }
+                    let (mut behind, mut follow) = (row.flags.contains('b'), row.flags.contains('f'));
+                    let a = theme::switch_row(ui, "Behind me", "", &mut behind);
+                    let b = theme::switch_row(
+                        ui,
+                        "Follow my face",
+                        "Across and down are then around your face.",
+                        &mut follow,
+                    );
+                    if a || b {
+                        row.flags = match (behind, follow) {
+                            (false, false) => "-",
+                            (true, false) => "b",
+                            (false, true) => "f",
+                            (true, true) => "bf",
+                        }
+                        .into();
+                        cmds.push(format!("sticker flags {} {}", row.id, row.flags));
+                    }
+                    ui.separator();
+                }
+            }
+            if let Some(id) = remove {
+                cmds.push(format!("sticker remove {id}"));
+                v.stickers.retain(|r| r.id != id);
+            }
+            if !v.stickers.is_empty() {
+                ui.add_space(6.0);
+            }
+            let kinds = [
+                ("text".to_owned(), "Text"),
+                ("card".to_owned(), "Name card"),
+                ("clock".to_owned(), "Clock"),
+                ("timer".to_owned(), "Timer"),
+                ("picture".to_owned(), "Picture"),
+            ];
+            theme::segmented(ui, "sticker kind", &mut v.new_kind, &kinds);
+            let line = |ui: &mut Ui, text: &mut String, hint: &str| {
+                ui.add(
+                    egui::TextEdit::singleline(text)
+                        .hint_text(hint)
+                        .desired_width(ui.available_width())
+                        .margin(vec2(10.0, 7.0)),
+                );
+            };
+            match v.new_kind.as_str() {
+                "text" => line(ui, &mut v.new_text, "Words to show"),
+                "card" => {
+                    line(ui, &mut v.new_text, "Name");
+                    line(ui, &mut v.new_title, "Title or role");
+                }
+                "picture" => {
+                    let (_, browse) = file_row(ui, &mut v.new_picture, "Picture file (PNG or JPEG)", v.can_browse);
+                    if browse {
+                        v.browse(ctx, Pick::Sticker);
+                    }
+                }
+                _ => {}
+            }
+            if matches!(v.new_kind.as_str(), "text" | "clock" | "timer") {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Colour").color(TEXT));
+                    egui::ComboBox::from_id_salt("sticker colour")
+                        .selected_text(title_case(&v.new_colour))
+                        .show_ui(ui, |ui| {
+                            for c in [
+                                "white", "black", "yellow", "orange", "red", "pink", "purple", "blue", "green", "grey",
+                            ] {
+                                ui.selectable_value(&mut v.new_colour, c.to_owned(), title_case(c));
+                            }
+                        });
+                });
+            }
+            let words = v.new_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = v.new_title.split_whitespace().collect::<Vec<_>>().join(" ");
+            let command = match v.new_kind.as_str() {
+                "text" if !words.is_empty() => Some(format!("text 0.5 0.5 0.08 - {} {words}", v.new_colour)),
+                "card" if !words.is_empty() => Some(format!("card 0.25 0.84 0.14 - {words} | {title}")),
+                "clock" => Some(format!("clock 0.9 0.07 0.06 - {}", v.new_colour)),
+                "timer" => Some(format!("timer 0.9 0.07 0.06 - {}", v.new_colour)),
+                "picture" if !v.new_picture.trim().is_empty() => {
+                    Some(format!("picture 0.15 0.2 0.2 - {}", v.new_picture.trim()))
+                }
+                _ => None,
+            };
+            if ui
+                .add_enabled(command.is_some(), egui::Button::new("Add sticker"))
+                .clicked()
+                && let Some(c) = command
+            {
+                cmds.push(format!("sticker add {c}"));
+                v.new_text.clear();
+                v.new_title.clear();
+            }
+        });
+    });
+}
+
+/// Saved looks: click one to use it, right-click to delete it, or save the current settings under a name.
+fn presets(v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>, enabled: bool) {
+    group(ui, "Presets");
+    ui.add_enabled_ui(enabled, |ui| {
+        card(ui, "", |ui| {
+            if v.presets.is_empty() {
+                hint(
+                    ui,
+                    "Save your look, effects and lighting here to switch back to them later.",
+                );
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for name in &v.presets {
+                        let resp = ui.button(name.as_str());
+                        if resp.clicked() {
+                            cmds.push(format!("preset load {name}"));
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("Delete").clicked() {
+                                cmds.push(format!("preset delete {name}"));
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                let edit = egui::TextEdit::singleline(&mut v.preset_name)
+                    .hint_text("Name")
+                    .desired_width(ui.available_width() - 70.0)
+                    .margin(vec2(10.0, 7.0));
+                let r = ui.add(edit);
+                let name: String = v
+                    .preset_name
+                    .trim()
+                    .chars()
+                    .map(|c| if c == ' ' { '_' } else { c })
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.add_enabled(!name.is_empty(), egui::Button::new("Save")).clicked() || enter) && !name.is_empty()
+                {
+                    cmds.push(format!("preset save {name}"));
+                    v.preset_name.clear();
+                }
+            });
+        });
+    });
+}
+
+/// Lighting and per-colour adjustments, done on this computer.
+fn lighting(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
+    let (c, v) = (&mut app.c, &mut app.view);
+    ui.add_enabled_ui(!c.low_power, |ui| lighting_cards(c, v, ui, cmds));
+}
+
+fn lighting_cards(c: &mut Controls, v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>) {
+    card(ui, "", |ui| {
+        ui.horizontal(|ui| {
+            theme::section(ui, "Lighting");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let neutral = c.lighting == [0; 5] && c.colours == [[0; 3]; 8];
+                if ui.add_enabled(!neutral, egui::Button::new("Reset").small()).clicked() {
+                    (c.lighting, c.colours) = ([0; 5], [[0; 3]; 8]);
+                    cmds.push("adjust reset".into());
+                }
+            });
+        });
+        ui.add_space(2.0);
+        let label = if v.picking_white {
+            "Click something white or grey in the preview"
+        } else {
+            "Pick white"
+        };
+        if ui.button(label).clicked() {
+            v.picking_white = !v.picking_white;
+        }
+        let labels = ["Temperature", "Tint", "Shadows", "Highlights", "Vibrance"];
+        for ((name, label), value) in LIGHTING.iter().zip(labels).zip(c.lighting.iter_mut()) {
+            let text = signed(*value);
+            if Slider::new(label, value, -100..=100, text).show(ui).changed() {
+                cmds.push(format!("{name} {value}"));
+            }
+        }
+    });
+    card(ui, "Colours", |ui| {
+        ui.horizontal(|ui| {
+            for (i, (_, hue)) in opal_effects::COLOURS.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+                let colour = egui::ecolor::Hsva::new(hue / 360.0, 0.75, 0.9, 1.0);
+                ui.painter().circle_filled(rect.center(), 11.0, Color32::from(colour));
+                if v.colour == i {
+                    ui.painter().circle_stroke(rect.center(), 13.5, Stroke::new(2.0, TEXT));
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    v.colour = i;
+                }
+            }
+        });
+        let (name, _) = opal_effects::COLOURS[v.colour];
+        let values = &mut c.colours[v.colour];
+        let mut changed = false;
+        for (label, value) in ["Hue", "Saturation", "Lightness"].into_iter().zip(values.iter_mut()) {
+            let text = signed(*value);
+            changed |= Slider::new(label, value, -100..=100, text).show(ui).changed();
+        }
+        if changed {
+            cmds.push(format!("colour {name} {} {} {}", values[0], values[1], values[2]));
+        }
+    });
 }
 
 /// What each setting does, in a few words.
-const HELP: [(&str, &str); 13] = [
+const HELP: [(&str, &str); 22] = [
+    (
+        "Zoom",
+        "Zooms into the middle of the picture. Follow my face takes over while it is on.",
+    ),
     (
         "Follow my face",
         "Keeps you in the middle of the picture as you move around. How close sets how tightly you are framed, \
          and how quickly it follows sets how fast the picture catches up with you.",
     ),
     (
+        "Presets",
+        "Saves your look, lighting, colours, blur or background picture and framing under a name. Click a preset to \
+         switch to it, or right-click it to delete it.",
+    ),
+    (
         "Blur background",
         "Softens everything behind you so only you stay sharp. Strength sets how soft it gets.",
+    ),
+    (
+        "Loop",
+        "Hold the button to record up to ten seconds, then let go: the recording plays in a loop instead of your \
+         live video until you go back to live. Bounce plays it forwards then backwards.",
+    ),
+    (
+        "Stickers",
+        "Words, a name card, a clock, a timer or a picture on top of your video. Click one to move it, size it, put \
+         it behind you or have it follow your face.",
+    ),
+    (
+        "Touch up and skin tone",
+        "Touch up softens fine detail on skin and leaves eyes and edges sharp. Even skin tone smooths out blotchy \
+         colour, and skin warmth makes skin a little warmer or cooler. Skin is found by its colour.",
+    ),
+    (
+        "Pixelate",
+        "Turns the whole picture into big squares. Higher makes the squares bigger.",
     ),
     (
         "Background picture",
@@ -1001,6 +1589,17 @@ const HELP: [(&str, &str); 13] = [
     (
         "Picture",
         "Fine tune brightness, contrast, colour strength and sharpness. Reset puts them back.",
+    ),
+    (
+        "Lighting",
+        "Temperature makes the picture warmer or cooler, tint more magenta or green. Shadows and highlights brighten \
+         or darken the dark and light parts, and vibrance makes dull colours stronger while leaving skin alone. \
+         Pick white, then click something white or grey in the preview, sets temperature and tint for you.",
+    ),
+    (
+        "Colours",
+        "Pick a colour, then shift its hue or make it stronger, weaker, lighter or darker. Other colours stay as \
+         they are.",
     ),
     (
         "Microphone",
@@ -1023,12 +1622,17 @@ const HELP: [(&str, &str); 13] = [
     (
         "Camera on",
         "When needed starts the camera only while an app is using it. Always keeps it running so apps start faster. \
-         Never keeps it off.",
+         Never keeps it off. Off while the screen is locked stops it whenever you lock your screen.",
     ),
     (
         "Low power mode",
         "Apps get the picture straight from the camera at 1080p. This uses less power, but the effects, Follow my \
          face and hand gestures are off. Changing it restarts the camera.",
+    ),
+    (
+        "Zebra stripes and histogram",
+        "Help with exposure. Stripes mark parts of the preview that are too bright to show detail, and the \
+         histogram shows how much of the picture is dark (left) or bright (right). Only the preview shows them.",
     ),
     (
         "Debug mode",
