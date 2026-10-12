@@ -102,6 +102,86 @@ impl ScreenLock {
     }
 }
 
+/// Apps using a camera right now, from Windows' record of camera use (started, not yet stopped).
+#[cfg(windows)]
+pub fn camera_apps() -> Vec<String> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_QWORD, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+    };
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let open = |parent: HKEY, path: &str| {
+        let mut key: HKEY = std::ptr::null_mut();
+        (unsafe { RegOpenKeyExW(parent, wide(path).as_ptr(), 0, KEY_READ, &mut key) } == 0).then_some(key)
+    };
+    let subkeys = |key: HKEY| {
+        let mut names = Vec::new();
+        for i in 0.. {
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            let r = unsafe {
+                RegEnumKeyExW(
+                    key,
+                    i,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if r != 0 {
+                break;
+            }
+            names.push(String::from_utf16_lossy(&buf[..len as usize]));
+        }
+        names
+    };
+    let qword = |key: HKEY, sub: &str, name: &str| {
+        let mut v = 0u64;
+        let mut size = 8u32;
+        let r = unsafe {
+            RegGetValueW(
+                key,
+                wide(sub).as_ptr(),
+                wide(name).as_ptr(),
+                RRF_RT_REG_QWORD,
+                std::ptr::null_mut(),
+                (&mut v as *mut u64).cast(),
+                &mut size,
+            )
+        };
+        (r == 0).then_some(v)
+    };
+    let in_use = |key: HKEY, sub: &str| {
+        qword(key, sub, "LastUsedTimeStop") == Some(0) && qword(key, sub, "LastUsedTimeStart").is_some_and(|t| t != 0)
+    };
+    let mut apps = Vec::new();
+    let base = "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam";
+    let Some(webcam) = open(HKEY_CURRENT_USER, base) else {
+        return apps;
+    };
+    for name in subkeys(webcam) {
+        if name == "NonPackaged" {
+            if let Some(np) = open(webcam, "NonPackaged") {
+                // Desktop programs, keyed by their path with '#' for each backslash.
+                for path in subkeys(np) {
+                    if in_use(np, &path) {
+                        let file = path.rsplit('#').next().unwrap_or(&path);
+                        apps.push(file.trim_end_matches(".exe").trim_end_matches(".EXE").to_owned());
+                    }
+                }
+                unsafe { RegCloseKey(np) };
+            }
+        } else if in_use(webcam, &name) {
+            // Store apps, keyed by package family name.
+            apps.push(name.split('_').next().unwrap_or(&name).to_owned());
+        }
+    }
+    unsafe { RegCloseKey(webcam) };
+    apps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

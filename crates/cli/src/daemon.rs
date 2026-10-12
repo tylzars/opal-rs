@@ -202,7 +202,8 @@ struct Session {
     /// The camera's own video device, watched for apps in low power mode.
     camera_node: Mutex<Option<PathBuf>>,
     resolution: Resolution,
-    output: Option<PathBuf>,
+    /// Whether video goes to an output apps open (else it streams all the time).
+    has_output: bool,
     state: Mutex<State>,
     blur: Mutex<Blur>,
     look: Mutex<Option<Look>>,
@@ -478,7 +479,7 @@ impl Session {
             Mode::On => true,
             Mode::Off => false,
             Mode::Auto => {
-                (self.output.is_none() && !self.low_power) || st.last_consumer.is_some_and(|t| t.elapsed() < OFF_DELAY)
+                (!self.has_output && !self.low_power) || st.last_consumer.is_some_and(|t| t.elapsed() < OFF_DELAY)
             }
         } && !(self.locked.load(Ordering::Relaxed) && self.lock_pause.load(Ordering::Relaxed));
         if want && self.frozen.load(Ordering::Relaxed) {
@@ -920,14 +921,6 @@ fn log_level(name: &str) -> Option<i32> {
         .map(|i| i as i32)
 }
 
-/// Black NV12 frame, written first so apps can open the output before video arrives.
-fn black_frame((w, h): (u32, u32)) -> Vec<u8> {
-    let y = (w * h) as usize;
-    let mut f = vec![0u8; y];
-    f.resize(y + y / 2, 128);
-    f
-}
-
 /// Commands for effects, which low power mode does not have.
 fn is_effect(command: &str) -> bool {
     matches!(
@@ -956,48 +949,6 @@ fn is_effect(command: &str) -> bool {
             | "video"
             | "snap"
     )
-}
-
-/// The camera's own video device, when it is plugged in and booted.
-fn find_camera_node() -> Option<PathBuf> {
-    std::fs::read_dir("/sys/class/video4linux")
-        .ok()?
-        .flatten()
-        .find_map(|e| {
-            let dir = e.path();
-            let read = |f: &str| std::fs::read_to_string(dir.join(f)).map(|s| s.trim().to_owned());
-            // `device` is the USB interface; its parent is the USB device.
-            let ours = read("index").is_ok_and(|i| i == "0")
-                && read("device/../idVendor").is_ok_and(|v| v == "03e7")
-                && read("device/../idProduct").is_ok_and(|p| p == "f63b");
-            ours.then(|| PathBuf::from("/dev").join(e.file_name()))
-        })
-}
-
-/// Names of the programs that have `path` open, one entry per process.
-fn consumers(path: &Path) -> Vec<String> {
-    let me = std::process::id().to_string();
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    procs
-        .flatten()
-        .filter(|p| {
-            let name = p.file_name();
-            let name = name.to_string_lossy();
-            name.bytes().all(|b| b.is_ascii_digit()) && name != me
-        })
-        .filter(|p| {
-            std::fs::read_dir(p.path().join("fd")).is_ok_and(|fds| {
-                fds.flatten()
-                    .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == path))
-            })
-        })
-        .map(|p| {
-            std::fs::read_to_string(p.path().join("comm"))
-                .map_or_else(|_| "?".into(), |c| c.trim().replace(char::is_whitespace, "_"))
-        })
-        .collect()
 }
 
 fn handle(session: &Session, stream: opal_ipc::Stream) -> Result<()> {
@@ -1036,18 +987,9 @@ pub fn run(
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     // In low power mode apps use the camera itself, not the virtual camera.
-    let output = output
-        .filter(|_| !low_power)
-        .map(|p| p.canonicalize().with_context(|| p.display().to_string()))
-        .transpose()?;
-    let mut out = match &output {
-        Some(path) => {
-            let mut o =
-                opal_v4l2::Output::open(path, vw, vh, opal_v4l2::NV12).with_context(|| path.display().to_string())?;
-            o.write(&black_frame((vw, vh)))?;
-            Some(o)
-        }
-        None => None,
+    let (mut out, mut watch) = match crate::output::open(output.filter(|_| !low_power), vw as usize, vh as usize)? {
+        Some((o, w)) => (Some(o), Some(w)),
+        None => (None, None),
     };
 
     if let Some(level) = std::env::var("OPAL_RS_LOG").ok().and_then(|l| log_level(&l)) {
@@ -1068,7 +1010,7 @@ pub fn run(
         low_power,
         camera_node: Mutex::new(None),
         resolution,
-        output: output.clone(),
+        has_output: out.is_some(),
         state: Mutex::new(State {
             mode: Mode::Auto,
             streaming: false,
@@ -1468,17 +1410,16 @@ pub fn run(
                 session.locked.store(locked, Ordering::Relaxed);
             }
         }
-        let apps = if low_power {
-            let mut node = session.camera_node.lock().unwrap();
-            if node.as_ref().is_none_or(|n| !n.exists()) {
-                *node = find_camera_node();
-            }
-            Some(node.as_deref().map_or_else(Vec::new, consumers))
+        let users = if low_power {
+            Some(crate::output::low_power_users(&mut session.camera_node.lock().unwrap()))
         } else {
-            output.as_deref().map(consumers)
+            watch.as_mut().map(|w| {
+                let names = w.users();
+                (names.len(), names)
+            })
         };
-        let count = apps.as_ref().map(Vec::len);
-        if let Some(mut apps) = apps {
+        let count = users.as_ref().map(|u| u.0);
+        if let Some((_, mut apps)) = users {
             apps.sort();
             apps.dedup();
             session.state.lock().unwrap().apps = apps;

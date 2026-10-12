@@ -2617,6 +2617,7 @@ dependencies = [
  "opal-effects",
  "opal-ipc",
  "opal-v4l2",
+ "opal-vcam",
  "opal-xlink",
  "windows-sys 0.61.2",
 ]
@@ -2634,6 +2635,14 @@ name = "opal-v4l2"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "opal-vcam"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
