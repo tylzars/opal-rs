@@ -100,6 +100,27 @@ fn boot_stamp() -> PathBuf {
     std::env::temp_dir().join("opal-rs-last-boot")
 }
 
+/// Restarts after the camera goes away are limited, so a camera that keeps failing is left alone.
+const MAX_RESTARTS: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(600);
+
+/// Time left before another boot is allowed.
+fn boot_wait() -> Duration {
+    std::fs::metadata(boot_stamp())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or(Duration::ZERO, |since| MIN_BOOT_INTERVAL.saturating_sub(since))
+}
+
+fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings, overrides: &[String]) -> Result<()> {
+    let booted = boot(dir)?;
+    let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
+    let sensor = sensor_name(&dev)?;
+    println!("sensor {sensor}");
+    daemon::run(dev, dir, &sensor, output, settings, overrides)
+}
+
 fn check_boot_interval() -> Result<()> {
     let Ok(modified) = std::fs::metadata(boot_stamp()).and_then(|m| m.modified()) else {
         return Ok(());
@@ -194,7 +215,8 @@ fn main() -> Result<ExitCode> {
             lut,
             settings,
         } => {
-            let settings = settings::Settings::load(&settings.unwrap_or_else(settings::default_path));
+            let settings_path = settings.unwrap_or_else(settings::default_path);
+            let settings = settings::Settings::load(&settings_path);
             let mut overrides = Vec::new();
             if let Some(r) = blur {
                 overrides.push(format!("blur {r}"));
@@ -202,11 +224,28 @@ fn main() -> Result<ExitCode> {
             if let Some(p) = lut {
                 overrides.push(format!("lut {}", p.display()));
             }
-            let booted = boot(&dir)?;
-            let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
-            let sensor = sensor_name(&dev)?;
-            println!("sensor {sensor}");
-            daemon::run(dev, &dir, &sensor, output, settings, &overrides)?;
+            let mut settings = Some(settings);
+            let mut restarts: Vec<Instant> = Vec::new();
+            loop {
+                let settings = match settings.take() {
+                    Some(s) => s,
+                    None => settings::Settings::load(&settings_path),
+                };
+                let result = run_session(&dir, output.clone(), settings, &overrides);
+                if daemon::stopped() {
+                    result?;
+                    break;
+                }
+                let err = result.err().unwrap_or_else(|| anyhow::anyhow!("session ended"));
+                restarts.retain(|t| t.elapsed() < RESTART_WINDOW);
+                if restarts.len() >= MAX_RESTARTS {
+                    return Err(err.context("too many restarts"));
+                }
+                restarts.push(Instant::now());
+                eprintln!("{err:#}; waiting for the camera");
+                wait_for_camera(Duration::MAX)?;
+                std::thread::sleep(boot_wait());
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Ctl { command } => Ok(if daemon::send(&command)? {

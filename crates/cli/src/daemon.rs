@@ -34,6 +34,11 @@ extern "C" fn on_signal(_: libc::c_int) {
     TERMINATE.store(true, Ordering::Relaxed);
 }
 
+/// True once a stop was requested by a signal or `ctl quit`.
+pub fn stopped() -> bool {
+    TERMINATE.load(Ordering::Relaxed)
+}
+
 pub fn socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
