@@ -107,6 +107,8 @@ pub struct State {
     can_browse: bool,
     /// Do not reopen the preview before this, while the camera restarts.
     hold: Option<Instant>,
+    /// Low power mode only: the preview was asked for. It reads the camera itself, which then turns apps away.
+    camera_preview: bool,
     /// The colour picked in the Colours card.
     colour: usize,
     /// The next click on the preview picks a white point.
@@ -156,6 +158,7 @@ impl State {
             picked: Arc::default(),
             can_browse,
             hold: None,
+            camera_preview: false,
             colour: 0,
             picking_white: false,
             presets: Vec::new(),
@@ -372,6 +375,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         // Reopen once the camera is back, with the new size.
         app.preview.stop();
         app.view.hold = Some(Instant::now() + Duration::from_secs(6));
+        app.view.camera_preview = false;
     }
 }
 
@@ -390,6 +394,12 @@ fn column(ui: &mut Ui, left: f32, width: f32, add: impl FnOnce(&mut Ui)) {
 fn keep_preview(app: &mut App, ctx: &egui::Context) {
     // Errors show in the preview itself, not as a message.
     if app.view.hold.is_some_and(|t| Instant::now() < t) || !app.want_preview {
+        return;
+    }
+    if app.c.low_power && !app.view.camera_preview {
+        if app.preview.running() {
+            app.preview.stop();
+        }
         return;
     }
     let since = app.preview.since_start();
@@ -469,6 +479,24 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
                 app.apply("video on".into());
             }
         });
+    } else if connected && app.c.low_power && !app.view.camera_preview {
+        centre(ui, 110.0, &mut |ui| {
+            ui.label(
+                egui::RichText::new("Preview is off in low power mode")
+                    .size(17.0)
+                    .color(TEXT),
+            );
+            if cfg!(windows) {
+                // The picture goes from the camera straight to apps, past the service.
+                ui.label(egui::RichText::new("Apps get the picture straight from the camera.").color(WEAK));
+                return;
+            }
+            ui.label(egui::RichText::new("Apps cannot use the camera while it shows.").color(WEAK));
+            ui.add_space(6.0);
+            if theme::primary(ui, "Show preview").clicked() {
+                app.view.camera_preview = true;
+            }
+        });
     } else if !showing {
         let (title, detail) = if !connected {
             (
@@ -495,6 +523,14 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
                 ui.label(egui::RichText::new(&detail).color(WEAK));
             }
         });
+    }
+
+    // In low power mode the preview holds the camera: offer to give it back to apps.
+    if connected && app.c.low_power && app.view.camera_preview {
+        let r = Rect::from_min_size(rect.right_bottom() + vec2(-140.0, -48.0), vec2(126.0, 34.0));
+        if ui.put(r, egui::Button::new("Stop preview")).clicked() {
+            app.view.camera_preview = false;
+        }
     }
 
     // Status pills.
