@@ -1,4 +1,4 @@
-//! Live preview: a capture thread that samples frames down to a small RGB image.
+//! Live preview: a thread that fetches frames and shrinks them to a small RGB image.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-/// Preview width in pixels; frames are sampled down to about this.
-const PREVIEW_WIDTH: usize = 640;
+/// Shortest time between preview frames.
+const FETCH_PERIOD: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct Shared {
@@ -20,7 +20,16 @@ struct Shared {
     error: Option<String>,
 }
 
-/// Owner side of the capture thread.
+/// Where preview frames come from.
+pub enum Source {
+    /// Small frames asked of the service. Apps keep the virtual camera to themselves: v4l2loopback lets only one
+    /// program read it at a time.
+    Service,
+    /// A video device of `width` x `height` NV12 frames (low power mode, where video does not pass through here).
+    Device(PathBuf, (usize, usize)),
+}
+
+/// Owner side of the preview thread.
 #[derive(Default)]
 pub struct Handle {
     shared: Arc<Mutex<Shared>>,
@@ -63,7 +72,7 @@ impl Handle {
         s.last_frame = None;
     }
 
-    pub fn start(&mut self, ctx: egui::Context, (device, (width, height)): (PathBuf, (usize, usize))) {
+    pub fn start(&mut self, ctx: egui::Context, source: Source) {
         let generation = {
             let mut s = self.shared.lock().unwrap();
             s.generation += 1;
@@ -74,8 +83,6 @@ impl Handle {
         };
         self.started = Some(Instant::now());
         let shared = self.shared.clone();
-        let step = (width / PREVIEW_WIDTH).max(1);
-        let size = [width / step, height / step];
         std::thread::spawn(move || {
             let current = || shared.lock().unwrap().generation == generation;
             // Hands a frame to the window; false once this thread is no longer wanted.
@@ -90,53 +97,17 @@ impl Handle {
                 ctx.request_repaint();
                 true
             };
-            // Linux reads the device apps see.
-            #[cfg(unix)]
-            let result = (|| -> std::io::Result<()> {
-                let mut cap = opal_v4l2::Capture::open(&device, width as u32, height as u32, opal_v4l2::NV12)?;
-                let mut last = Instant::now() - Duration::from_secs(1);
-                while current() {
-                    let rgb = cap.next(Duration::from_secs(5), |f| {
-                        (last.elapsed() > Duration::from_millis(40) && f.data.len() >= width * height * 3 / 2)
-                            .then(|| nv12_to_rgb_small(f.data, width, height, step))
-                    })?;
-                    if let Some(rgb) = rgb {
-                        last = Instant::now();
-                        if !store(rgb, size) {
-                            break;
-                        }
-                    }
-                }
-                Ok(())
-            })();
-            // Windows asks the service for small frames.
-            #[cfg(windows)]
-            let result = (|| -> std::io::Result<()> {
-                let _ = (size, step);
-                while current() {
-                    let asked = Instant::now();
-                    match opal_ipc::request_data("preview", Duration::from_secs(5)) {
-                        Ok((words, data)) => {
-                            let mut n = words.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
-                            if let (Some(w), Some(h)) = (n.next(), n.next())
-                                && data.len() >= w * h * 3 / 2
-                                && !store(nv12_to_rgb_small(&data, w, h, 1), [w, h])
-                            {
-                                break;
-                            }
-                        }
-                        // The service answers, just without a frame yet.
-                        Err(e) if e.kind() == std::io::ErrorKind::Other => {}
-                        Err(e) => return Err(e),
-                    }
-                    std::thread::sleep(Duration::from_millis(80).saturating_sub(asked.elapsed()));
-                }
-                Ok(())
-            })();
+            let (name, result) = match source {
+                Source::Service => ("the camera service".to_owned(), from_service(&current, &store)),
+                Source::Device(device, (width, height)) => (
+                    device.display().to_string(),
+                    from_device(&device, width, height, &current, &store),
+                ),
+            };
             let mut s = shared.lock().unwrap();
             if s.generation == generation {
                 if let Err(e) = result {
-                    s.error = Some(format!("{}: {e}", device.display()));
+                    s.error = Some(format!("{name}: {e}"));
                 }
                 s.running = false;
                 drop(s);
@@ -144,6 +115,70 @@ impl Handle {
             }
         });
     }
+}
+
+/// Asks the service for frames until `current` turns false or `store` refuses one.
+fn from_service(current: &dyn Fn() -> bool, store: &dyn Fn(Vec<u8>, [usize; 2]) -> bool) -> std::io::Result<()> {
+    while current() {
+        let asked = Instant::now();
+        match opal_ipc::request_data("preview", Duration::from_secs(5)) {
+            Ok((words, data)) => {
+                let mut n = words.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
+                if let (Some(w), Some(h)) = (n.next(), n.next())
+                    && data.len() >= w * h * 3 / 2
+                    && !store(nv12_to_rgb_small(&data, w, h, 1), [w, h])
+                {
+                    break;
+                }
+            }
+            // The service answers, just without a frame yet.
+            Err(e) if e.kind() == std::io::ErrorKind::Other => {}
+            Err(e) => return Err(e),
+        }
+        std::thread::sleep(FETCH_PERIOD.saturating_sub(asked.elapsed()));
+    }
+    Ok(())
+}
+
+/// Reads a video device until `current` turns false or `store` refuses a frame.
+#[cfg(unix)]
+fn from_device(
+    device: &std::path::Path,
+    width: usize,
+    height: usize,
+    current: &dyn Fn() -> bool,
+    store: &dyn Fn(Vec<u8>, [usize; 2]) -> bool,
+) -> std::io::Result<()> {
+    // Preview width in pixels; frames are averaged down to about this (the service does the same).
+    const PREVIEW_WIDTH: usize = 640;
+    let step = (width / PREVIEW_WIDTH).max(1);
+    let size = [width / step, height / step];
+    let mut cap = opal_v4l2::Capture::open(device, width as u32, height as u32, opal_v4l2::NV12)?;
+    let mut last = Instant::now() - Duration::from_secs(1);
+    while current() {
+        let rgb = cap.next(Duration::from_secs(5), |f| {
+            (last.elapsed() > FETCH_PERIOD && f.data.len() >= width * height * 3 / 2)
+                .then(|| nv12_to_rgb_small(f.data, width, height, step))
+        })?;
+        if let Some(rgb) = rgb {
+            last = Instant::now();
+            if !store(rgb, size) {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn from_device(
+    _: &std::path::Path,
+    _: usize,
+    _: usize,
+    _: &dyn Fn() -> bool,
+    _: &dyn Fn(Vec<u8>, [usize; 2]) -> bool,
+) -> std::io::Result<()> {
+    Err(std::io::Error::other("not available on Windows"))
 }
 
 /// A `width` x `height` NV12 frame shrunk `step` times as RGB, each pixel the average of its block (sampling single

@@ -8,13 +8,11 @@ mod setup;
 mod theme;
 mod view;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui;
 
-const VIDEO: &str = "/dev/video10";
 const RESOLUTIONS: [(&str, usize, usize); 4] = [
     ("720p", 1280, 720),
     ("1080p", 1920, 1080),
@@ -356,12 +354,12 @@ impl App {
         words.next()
     }
 
-    /// Opens the device apps see, or the camera itself in low power mode.
+    /// Takes frames from the service, or from the camera itself in low power mode.
     fn start_preview(&mut self, ctx: &egui::Context) {
-        let source = if self.c.low_power {
-            (preview::camera_node(), video_size("1080p"))
+        let source = if self.c.low_power && cfg!(unix) {
+            preview::Source::Device(preview::camera_node(), video_size("1080p"))
         } else {
-            (PathBuf::from(VIDEO), video_size(&self.c.resolution))
+            preview::Source::Service
         };
         self.preview.start(ctx.clone(), source);
     }

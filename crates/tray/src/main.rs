@@ -224,7 +224,8 @@ fn main() {
     if let Err(e) = opal_ipc::start_service() {
         eprintln!("opal-rs: {e}");
     }
-    let handle = match Tray::default().spawn() {
+    // At login the desktop may start this before its tray host is up: wait for the host rather than give up.
+    let handle = match Tray::default().assume_sni_available(true).spawn() {
         Ok(h) => h,
         Err(e) => {
             eprintln!("no tray available: {e}");

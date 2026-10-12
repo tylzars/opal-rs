@@ -31,6 +31,8 @@ const LOW_POWER_START: Duration = Duration::from_secs(3);
 /// Shortest time from a stop to the next start.
 const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
+/// How often the control socket is checked while waiting out `POLL`.
+const ACCEPT_POLL: Duration = Duration::from_millis(10);
 const TEMPERATURE_PERIOD: Duration = Duration::from_secs(5);
 const LOCK_PERIOD: Duration = Duration::from_secs(2);
 /// A camera that sends nothing for this long (not even keepalive replies) has stopped answering. Building a
@@ -66,6 +68,8 @@ struct State {
     /// Programs using the camera.
     apps: Vec<String>,
     last_consumer: Option<Instant>,
+    /// When the control panel last asked for a preview frame.
+    last_preview: Option<Instant>,
     last_change: Instant,
     /// Frame count when streaming last started, and when the first frame after that arrived.
     start_frames: u64,
@@ -954,13 +958,19 @@ fn is_effect(command: &str) -> bool {
 /// Largest preview width; the latest frame is averaged down to about this.
 const PREVIEW_WIDTH: usize = 640;
 
-/// Replies with the latest frame shrunk for the control panel: `bytes <n> <width> <height>`, then NV12.
+/// Replies with the latest frame shrunk for the control panel: `bytes <n> <width> <height>`, then NV12. The panel
+/// counts as an app using the camera while it asks.
 fn send_preview(session: &Session, mut stream: opal_ipc::Stream) -> Result<()> {
+    let streaming = {
+        let mut st = session.state.lock().unwrap();
+        st.last_preview = Some(Instant::now());
+        st.streaming
+    };
     let (w, h) = session.resolution.size();
     let (w, h) = (w as usize, h as usize);
     let small = {
         let last = session.last_frame.lock().unwrap();
-        (last.len() >= w * h * 3 / 2).then(|| shrink_nv12(&last, w, h, w.div_ceil(PREVIEW_WIDTH)))
+        (streaming && last.len() >= w * h * 3 / 2).then(|| shrink_nv12(&last, w, h, w.div_ceil(PREVIEW_WIDTH)))
     };
     match small {
         Some((data, sw, sh)) => {
@@ -1068,6 +1078,7 @@ pub fn run(
             consumers: 0,
             apps: Vec::new(),
             last_consumer: None,
+            last_preview: None,
             last_change: Instant::now() - RESTART_AFTER,
             start_frames: 0,
             first_frame: None,
@@ -1469,6 +1480,23 @@ pub fn run(
                 (names.len(), names)
             })
         };
+        // The control panel takes its preview from here rather than from the output, which v4l2loopback lets
+        // only one app read.
+        let previewing = !low_power
+            && session
+                .state
+                .lock()
+                .unwrap()
+                .last_preview
+                .is_some_and(|t| t.elapsed() < OFF_DELAY);
+        let users = match users {
+            Some((n, mut names)) if previewing => {
+                names.push("opal-rs-gui".into());
+                Some((n + 1, names))
+            }
+            None if previewing => Some((1, vec!["opal-rs-gui".into()])),
+            u => u,
+        };
         let count = users.as_ref().map(|u| u.0);
         if let Some((_, mut apps)) = users {
             apps.sort();
@@ -1479,20 +1507,22 @@ pub fn run(
             result = Err(e);
             break;
         }
-        match listener.accept() {
-            Ok(Some(stream)) => {
-                if let Err(e) = handle(&session, stream) {
-                    eprintln!("control: {e}");
+        // Waits out the poll period, answering requests as they come so the preview keeps up.
+        let until = Instant::now() + POLL;
+        while result.is_ok() && Instant::now() < until {
+            match listener.accept() {
+                Ok(Some(stream)) => {
+                    if let Err(e) = handle(&session, stream) {
+                        eprintln!("control: {e}");
+                    }
                 }
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                result = Err(e.into());
-                break;
+                Ok(None) => std::thread::sleep(ACCEPT_POLL),
+                Err(e) => result = Err(e.into()),
             }
         }
-        std::thread::sleep(POLL);
+        if result.is_err() {
+            break;
+        }
     }
     done.store(true, Ordering::Relaxed);
     let _ = temperature.join();
