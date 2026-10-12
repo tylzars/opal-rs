@@ -224,6 +224,7 @@ impl Session {
                 };
                 Ok(String::new())
             }
+            ["settings"] => Ok(self.settings.lock().unwrap().commands().collect::<Vec<_>>().join("; ")),
             ["lut", "off"] => {
                 *self.look.lock().unwrap() = None;
                 Ok(String::new())

@@ -50,6 +50,12 @@
    Focus, exposure, white balance, image adjustments, microphone gain, blur, colour look and framing are saved in
    `~/.config/opal-rs/settings` and restored the next time the service starts.
 
+4. Or use the control panel, which also shows a preview:
+   ```shell
+   cargo install --path crates/gui
+   opal-rs-gui
+   ```
+
 Starting the service reboots the camera, which drops it off USB for a few seconds. `opal-rs` refuses to boot it again
 within a minute.
 
