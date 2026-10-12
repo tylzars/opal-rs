@@ -1,0 +1,6 @@
+#!/bin/sh
+# The USB rule is gone with the package; stop applying it.
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    udevadm control --reload-rules || true
+fi

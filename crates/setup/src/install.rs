@@ -182,10 +182,24 @@ fn remove() -> Result<(), String> {
     // The installer is running from the folder, so it and the folder go at the next restart.
     delete_at_restart(&dir.join(SETUP));
     delete_at_restart(&dir);
-    message(
-        "Opal C1 is removed. Your settings and camera files stay in %APPDATA%\\opal-rs and %LOCALAPPDATA%\\opal-rs.",
-        MB_OK | MB_ICONINFORMATION,
-    );
+    let data: Vec<PathBuf> = ["APPDATA", "LOCALAPPDATA"]
+        .iter()
+        .filter_map(|v| Some(PathBuf::from(std::env::var_os(v)?).join("opal-rs")))
+        .filter(|d| d.exists())
+        .collect();
+    if !data.is_empty()
+        && message(
+            "Opal C1 is removed.\n\nAlso delete your settings, presets, stickers and the camera files copied from \
+             Opal Composer?",
+            MB_YESNO | MB_ICONINFORMATION,
+        )
+    {
+        for d in data {
+            if std::fs::remove_dir_all(&d).is_err() {
+                delete_at_restart(&d);
+            }
+        }
+    }
     Ok(())
 }
 

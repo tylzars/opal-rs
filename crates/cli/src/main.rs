@@ -4,6 +4,7 @@ mod output;
 mod platform;
 mod settings;
 mod stickers;
+mod uninstall;
 mod webcam;
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,18 @@ enum Command {
     },
     /// List attached cameras
     List,
+    /// Remove opal-rs, its settings and camera files, and what it set up on this computer
+    Uninstall {
+        /// Keep settings, presets, stickers and camera files
+        #[arg(long)]
+        keep_data: bool,
+        /// Do not ask first
+        #[arg(long)]
+        yes: bool,
+        /// Only list what would be removed
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Boot the camera firmware into RAM
     Boot,
     /// Boot and print device information
@@ -390,6 +403,15 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Ctl { command } => Ok(if daemon::send(&command)? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
+        Command::Uninstall {
+            keep_data,
+            yes,
+            dry_run,
+        } => Ok(if uninstall::uninstall(keep_data, yes, dry_run)? {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE

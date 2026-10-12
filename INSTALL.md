@@ -17,15 +17,30 @@ asks you to set a password and confirm it once after a restart (MOK enrollment);
 install says v4l2loopback was already loaded with other settings, restart the computer.
 
 Then log out and back in: the service and the tray icon start on their own. Open "Opal C1" from the app menu for the
-control panel. To remove it: `sudo apt remove opal-rs`.
+control panel. To remove it, see [Uninstalling](#uninstalling).
 
 Other Linux distributions: build from source, below.
 
 ### Windows 11 (not yet tried on a real machine)
 Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the
 "Opal C1 Virtual" camera, starts the tray icon when you sign in, adds "Opal C1" to the Start menu and offers to start
-it right away. To remove it: Settings > Apps > Installed apps > Opal C1 (opal-rs). Your settings and camera files stay
-in `%APPDATA%\opal-rs` and `%LOCALAPPDATA%\opal-rs`.
+it right away. To remove it, see [Uninstalling](#uninstalling).
+
+## Uninstalling
+```shell
+opal-rs uninstall
+```
+It lists what it will remove and asks first, then stops the service, tray icon and control panel, deletes your
+settings, presets, stickers and the camera files (`--keep-data` keeps them), and removes the service and autostart
+files. With an administrator password prompt it removes the package, or the system files a source install copied in
+(only exact copies of the ones from `dist/`). `--dry-run` only lists it all.
+
+- `sudo apt remove opal-rs` alone removes the programs and system files but keeps your settings and camera files in
+  `~/.config/opal-rs` and `~/.local/share/opal-rs`. v4l2loopback stays loaded until you restart, and
+  `sudo apt autoremove` removes `v4l2loopback-dkms` if nothing else uses it.
+- On Windows, Settings > Apps > Installed apps > Opal C1 (opal-rs) > Uninstall does the same and asks whether to
+  delete your settings and camera files too.
+- The camera needs nothing: opal-rs never writes to its flash, and unplugging it returns it to its own firmware.
 
 ## Building from source on Linux
 
