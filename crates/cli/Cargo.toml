@@ -22,7 +22,9 @@ Composer disk image, which the control panel asks for on first run."""
 section = "video"
 priority = "optional"
 depends = "$auto, systemd, udev, kmod"
-recommends = "v4l2loopback-dkms, zenity"
+recommends = "zenity"
+# Newer Ubuntu kernels carry v4l2loopback, signed; the DKMS build would replace it with an older, unsigned one.
+suggests = "v4l2loopback-dkms"
 maintainer-scripts = "../../dist/deb/"
 assets = [
     ["target/release/opal-rs", "usr/bin/", "755"],

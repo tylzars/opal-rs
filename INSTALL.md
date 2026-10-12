@@ -12,9 +12,10 @@ The package and the installer are made as described in [Building the packages](#
 ```shell
 sudo apt install ./opal-rs_0.1.0-1_amd64.deb
 ```
-This also installs `v4l2loopback-dkms` for the "Opal C1 Virtual" camera. On a computer with Secure Boot, that module
-asks you to set a password and confirm it once after a restart (MOK enrollment); the package cannot skip this. If the
-install says v4l2loopback was already loaded with other settings, restart the computer.
+The "Opal C1 Virtual" camera uses the kernel's `v4l2loopback` module, which current Ubuntu kernels include. If the
+install says this kernel has none, also install `v4l2loopback-dkms`; on a computer with Secure Boot that one asks you
+to set a password and confirm it once after a restart (MOK enrollment). If the install says v4l2loopback was already
+loaded with other settings, restart the computer.
 
 Then log out and back in: the service and the tray icon start on their own. Open "Opal C1" from the app menu for the
 control panel. To remove it, see [Uninstalling](#uninstalling).

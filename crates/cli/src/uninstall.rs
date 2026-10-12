@@ -169,7 +169,9 @@ fn remove(path: &Path) -> std::io::Result<()> {
 
 fn run(command: &[String], admin: bool) -> std::io::Result<bool> {
     let mut c = if admin && cfg!(unix) {
-        let mut c = Command::new("pkexec");
+        // sudo asks in the terminal; without one, pkexec asks through the desktop.
+        use std::io::IsTerminal;
+        let mut c = Command::new(if std::io::stdin().is_terminal() { "sudo" } else { "pkexec" });
         c.args(command);
         c
     } else {

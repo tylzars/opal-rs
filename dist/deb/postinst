@@ -4,8 +4,10 @@ set -e
 if [ "$1" = configure ]; then
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=usb --attr-match=idVendor=03e7 || true
-    if ! grep -q '^v4l2loopback ' /proc/modules; then
-        modprobe v4l2loopback || echo "opal-rs: could not load v4l2loopback; is v4l2loopback-dkms installed?"
+    if ! modinfo v4l2loopback >/dev/null 2>&1; then
+        echo "opal-rs: this kernel has no v4l2loopback; install v4l2loopback-dkms for the Opal C1 Virtual camera."
+    elif ! grep -q '^v4l2loopback ' /proc/modules; then
+        modprobe v4l2loopback || echo "opal-rs: could not load v4l2loopback."
     elif [ ! -e /dev/video10 ]; then
         echo "opal-rs: v4l2loopback is already loaded with other settings; restart the computer for the Opal C1 Virtual camera."
     fi
