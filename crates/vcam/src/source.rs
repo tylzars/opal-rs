@@ -77,7 +77,7 @@ impl Shared {
                 &HSTRING::from(name),
             )
         };
-        let handle = create(shared::GLOBAL_NAME).or_else(|_| create(shared::LOCAL_NAME));
+        let handle = create(shared::NAME);
         unsafe { LocalFree(Some(HLOCAL(sd.0))) };
         let handle = handle?;
         let address = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, shared::SIZE) };

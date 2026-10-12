@@ -138,6 +138,8 @@ impl IClassFactory_Impl for Factory_Impl {
 #[implement(IMFActivate)]
 struct Activate {
     attributes: IMFAttributes,
+    /// The source handed out, shut down through the activate when Frame Server is done with it.
+    source: std::sync::Mutex<Option<IMFMediaSourceEx>>,
 }
 
 impl Activate {
@@ -146,21 +148,34 @@ impl Activate {
         unsafe { MFCreateAttributes(&mut attributes, 1)? };
         Ok(Self {
             attributes: attributes.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?,
+            source: std::sync::Mutex::new(None),
         })
     }
 }
 
 impl IMFActivate_Impl for Activate_Impl {
     fn ActivateObject(&self, riid: *const GUID, ppv: *mut *mut c_void) -> Result<()> {
-        let source: IMFMediaSourceEx = Source::new()?.into();
+        let mut slot = self.source.lock().unwrap();
+        let source = match &*slot {
+            Some(s) => s.clone(),
+            None => {
+                let s: IMFMediaSourceEx = Source::new()?.into();
+                *slot = Some(s.clone());
+                s
+            }
+        };
         unsafe { source.query(riid, ppv).ok() }
     }
 
     fn ShutdownObject(&self) -> Result<()> {
+        if let Some(s) = self.source.lock().unwrap().take() {
+            unsafe { s.Shutdown()? };
+        }
         Ok(())
     }
 
     fn DetachObject(&self) -> Result<()> {
+        self.source.lock().unwrap().take();
         Ok(())
     }
 }

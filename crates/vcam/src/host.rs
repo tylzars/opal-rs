@@ -99,9 +99,7 @@ impl Frames {
 
 fn open() -> Option<(HANDLE, MEMORY_MAPPED_VIEW_ADDRESS, View)> {
     let access = FILE_MAP_READ.0 | FILE_MAP_WRITE.0;
-    let handle = [shared::GLOBAL_NAME, shared::LOCAL_NAME]
-        .iter()
-        .find_map(|name| unsafe { OpenFileMappingW(access, false, &HSTRING::from(*name)).ok() })?;
+    let handle = unsafe { OpenFileMappingW(access, false, &HSTRING::from(shared::NAME)).ok()? };
     let address = unsafe { MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, shared::SIZE) };
     if address.Value.is_null() {
         let _ = unsafe { CloseHandle(handle) };

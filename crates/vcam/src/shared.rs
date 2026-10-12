@@ -6,9 +6,8 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Name of the shared memory. The source creates it in the global namespace, as Frame Server runs it outside the
-/// user's session; it falls back to the session's own namespace when it runs inside an app instead.
-pub const GLOBAL_NAME: &str = "Global\\opal-rs-vcam";
-pub const LOCAL_NAME: &str = "Local\\opal-rs-vcam";
+/// user's session, and the service in the user's session opens it there.
+pub const NAME: &str = "Global\\opal-rs-vcam";
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"OPVC");
 pub const VERSION: u32 = 1;
