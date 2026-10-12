@@ -318,6 +318,21 @@ fn stream_for(st: &mut State, name: &str) -> u32 {
     id
 }
 
+/// The device closing a stream it writes to. Refused while packets it sent are unread. Once closed, the stream's
+/// name is free, so the device can open it again (as it does to make room for bigger packets) and gets a new id.
+fn close_remote(st: &mut State, id: u32) -> bool {
+    let Some(s) = st.streams.get_mut(&id) else {
+        return true;
+    };
+    if !s.incoming.is_empty() {
+        return false;
+    }
+    if s.write_size == 0 {
+        st.streams.remove(&id);
+    }
+    true
+}
+
 fn wait<'a>(
     cond: &Condvar,
     guard: std::sync::MutexGuard<'a, State>,
@@ -382,11 +397,8 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
                 reply(&shared, &h, id, h.size, &h.name, ACK);
             }
             CLOSE_STREAM_REQ => {
-                let pending = {
-                    let st = shared.state.lock().unwrap();
-                    st.streams.get(&h.stream).is_some_and(|s| !s.incoming.is_empty())
-                };
-                reply(&shared, &h, h.stream, 0, "", if pending { NACK } else { ACK });
+                let closed = close_remote(&mut shared.state.lock().unwrap(), h.stream);
+                reply(&shared, &h, h.stream, 0, "", if closed { ACK } else { NACK });
             }
             PING_REQ => reply(&shared, &h, 0, 0, "", ACK),
             RESET_REQ => {
@@ -407,6 +419,25 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopened_device_stream_gets_a_new_id() {
+        let mut st = State::default();
+        let rgb = stream_for(&mut st, "rgb");
+        let control = stream_for(&mut st, "control");
+        st.streams.get_mut(&control).unwrap().write_size = 1024;
+        st.streams.get_mut(&rgb).unwrap().incoming.push_back(vec![1]);
+        assert!(!close_remote(&mut st, rgb), "unread packets");
+        st.streams.get_mut(&rgb).unwrap().incoming.clear();
+        assert!(close_remote(&mut st, rgb));
+        let again = stream_for(&mut st, "rgb");
+        assert_ne!(again, rgb);
+        assert_ne!(again, control);
+        // Streams the host writes to keep their id.
+        assert!(close_remote(&mut st, control));
+        assert_eq!(stream_for(&mut st, "control"), control);
+        assert!(close_remote(&mut st, 999));
+    }
 
     #[test]
     fn create_stream_header_bytes() {

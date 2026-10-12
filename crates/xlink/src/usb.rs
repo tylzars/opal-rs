@@ -10,10 +10,14 @@ use nusb::transfer::{Buffer, Bulk, In, Out};
 const EP_OUT: u8 = 0x01;
 const EP_IN: u8 = 0x81;
 const MAX_TRANSFER: usize = 1 << 20;
+/// Reads kept queued at once while a large packet comes in, so the next is ready the moment one completes.
+const READ_DEPTH: usize = 4;
 
 pub struct Reader {
     ep: nusb::Endpoint<Bulk, In>,
     carry: VecDeque<u8>,
+    /// Bytes asked for by reads still queued.
+    queued: usize,
 }
 
 pub struct Writer {
@@ -29,6 +33,7 @@ pub fn open(info: &nusb::DeviceInfo) -> io::Result<(Reader, Writer)> {
         Reader {
             ep: ep_in,
             carry: VecDeque::new(),
+            queued: 0,
         },
         Writer { ep: ep_out },
     ))
@@ -44,10 +49,14 @@ impl Reader {
                 out.extend(self.carry.drain(..k));
                 continue;
             }
+            // Queue reads for the rest of the packet, never more than it needs, so none waits on data not yet sent.
             let mps = self.ep.max_packet_size();
-            let want = (n - out.len()).min(MAX_TRANSFER);
-            let len = want.div_ceil(mps) * mps;
-            self.ep.submit(Buffer::new(len));
+            let need = n - out.len();
+            while self.ep.pending() < READ_DEPTH && self.queued < need {
+                let len = (need - self.queued).min(MAX_TRANSFER).div_ceil(mps) * mps;
+                self.ep.submit(Buffer::new(len));
+                self.queued += len;
+            }
             let done = match timeout {
                 Some(t) => match self.ep.wait_next_complete(t) {
                     Some(c) => c,
@@ -56,6 +65,7 @@ impl Reader {
                         while self.ep.pending() > 0 {
                             self.ep.wait_next_complete(Duration::from_secs(1));
                         }
+                        self.queued = 0;
                         return Err(io::ErrorKind::TimedOut.into());
                     }
                 },
@@ -65,6 +75,7 @@ impl Reader {
                     }
                 },
             };
+            self.queued = self.queued.saturating_sub(done.buffer.requested_len());
             done.status.map_err(io::Error::other)?;
             let got = &done.buffer[..];
             let k = (n - out.len()).min(got.len());
