@@ -723,6 +723,7 @@ pub fn send(words: &[String]) -> Result<bool> {
     let socket = socket_path();
     let mut stream =
         UnixStream::connect(&socket).with_context(|| format!("no running session at {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut words = words.to_vec();
     // Paths are resolved by the daemon, which runs in another directory.
     if let [cmd, path, ..] = words.as_mut_slice()
