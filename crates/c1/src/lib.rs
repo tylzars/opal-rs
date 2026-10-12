@@ -234,7 +234,9 @@ pub fn pipeline(
         video_width: width as i32,
         video_height: height as i32,
         resolution: resolution::K4,
-        fps: 30.0,
+        // Asking for more than 30 keeps frame times short: at 30 the camera stretches each frame past its exposure
+        // (26 fps in room light against 29 at 36). Its 4K readout tops out near 37. Low power video is fixed at 30.
+        fps: if low_power { 30.0 } else { 36.0 },
         isp_scale: if num < den {
             IspScale {
                 horiz_num: num,
