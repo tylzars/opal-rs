@@ -48,50 +48,59 @@ pub fn default_path() -> PathBuf {
     crate::platform::config_dir().join("settings")
 }
 
+/// Commands kept as settings, each standing for its own setting.
+const KEPT: &[&str] = &[
+    "focus",
+    "exposure",
+    "wb",
+    "ev",
+    "brightness",
+    "contrast",
+    "saturation",
+    "sharpness",
+    "adjust",
+    "antibanding",
+    "gain",
+    "mic",
+    "blur",
+    "bokeh",
+    "lut",
+    "background",
+    "zoom",
+    "warmth",
+    "tint",
+    "shadows",
+    "highlights",
+    "vibrance",
+    "magnify",
+    "pixelate",
+    "touchup",
+    "tone",
+    "tracking",
+    "resolution",
+    "gestures",
+    "power",
+    "lockpause",
+];
+
 /// The setting a command changes, if it is one that is kept.
 fn group(command: &str) -> Option<&'static str> {
-    Some(match command.split_whitespace().next()? {
-        "focus" | "af" => "focus",
-        "exposure" | "ae" => "exposure",
-        "wb" | "awb" => "wb",
-        "ev" => "ev",
-        "brightness" => "brightness",
-        "contrast" => "contrast",
-        "saturation" => "saturation",
-        "sharpness" => "sharpness",
-        "adjust" => "adjust",
-        "antibanding" => "antibanding",
-        "gain" => "gain",
-        "mic" => "mic",
-        "blur" => "blur",
-        "bokeh" => "bokeh",
-        "lut" => "lut",
-        "background" => "background",
-        "zoom" => "zoom",
-        "warmth" => "warmth",
-        "tint" => "tint",
-        "shadows" => "shadows",
-        "highlights" => "highlights",
-        "vibrance" => "vibrance",
+    let mut words = command.split_whitespace();
+    let first = words.next()?;
+    Some(match first {
+        "af" => "focus",
+        "ae" => "exposure",
+        "awb" => "wb",
         "colour" => {
-            let name = command.split_whitespace().nth(1)?;
+            let name = words.next()?;
             opal_effects::COLOURS.iter().find(|(n, _)| *n == name)?.0
         }
-        "magnify" => "magnify",
-        "pixelate" => "pixelate",
-        "touchup" => "touchup",
-        "tone" => "tone",
-        "tracking" => "tracking",
-        "resolution" => "resolution",
-        "gestures" => "gestures",
-        "gesture" => match command.split_whitespace().nth(1)? {
+        "gesture" => match words.next()? {
             "peace" => "gesture peace",
             "pinch" => "gesture pinch",
             _ => return None,
         },
-        "power" => "power",
-        "lockpause" => "lockpause",
-        _ => return None,
+        _ => KEPT.iter().find(|k| **k == first)?,
     })
 }
 

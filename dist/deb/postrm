@@ -5,6 +5,7 @@ if [ "$1" = remove ] || [ "$1" = purge ]; then
     udevadm control --reload-rules || true
 fi
 if [ "$1" = purge ]; then
+    rm -rf /var/lib/opal-rs
     f=/etc/modprobe.d/opal-rs-v4l2loopback.conf
     if [ -f "$f" ] && head -n 1 "$f" | grep -q '^# Written by opal-rs'; then
         rm -f "$f"

@@ -223,7 +223,8 @@ pub fn file_dialog(title: &str, kind: &str, extensions: &[&str]) -> Command {
         // The standard Open dialog, through PowerShell; it prints the chosen file.
         let patterns: Vec<String> = extensions.iter().map(|e| format!("*.{e}")).collect();
         let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+             Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
              $d.Title = '{title}'; $d.Filter = '{kind}|{}'; if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}",
             patterns.join(";")
         );
@@ -510,7 +511,12 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
         let (title, detail) = if !connected {
             (
                 "The camera service is not running",
-                "Start it with: systemctl --user start opal-rs".to_owned(),
+                if cfg!(windows) {
+                    "It starts with the tray icon at sign-in; run opal-rs-tray in the opal-rs folder to start it now."
+                        .to_owned()
+                } else {
+                    "Start it with: systemctl --user start opal-rs".to_owned()
+                },
             )
         } else if !app.want_preview {
             ("Preview paused", String::new())

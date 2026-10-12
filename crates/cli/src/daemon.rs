@@ -44,6 +44,8 @@ const SILENCE: Duration = Duration::from_secs(20);
 const FADE: Duration = Duration::from_millis(300);
 /// Blur radius for `blur on`, in frame pixels.
 const DEFAULT_BLUR: usize = 24;
+/// Past this the lens blur takes longer than a frame.
+const MAX_BLUR: usize = 64;
 /// How far each new mask moves the smoothed one.
 const MASK_FOLLOW: f32 = 0.5;
 
@@ -95,6 +97,8 @@ struct Clip {
 
 /// Fixed facts about the connected camera, shown in status.
 pub struct DeviceInfo {
+    /// Image sensor, such as IMX582.
+    pub sensor: String,
     pub serial: String,
     /// USB link speed: high, super and so on.
     pub usb: String,
@@ -436,7 +440,7 @@ impl Session {
             self.link.write(self.control, &opal_c1::start_control().to_packet())?;
             self.link.write(self.led, &self.streaming_led().packet())?;
             for c in self.settings.lock().unwrap().camera_commands() {
-                if let Some(c) = parse_control(c) {
+                if let Ok(c) = parse_control(c) {
                     self.link.write(self.control, &c.to_packet())?;
                 }
             }
@@ -516,7 +520,7 @@ impl Session {
                 let amount: Option<f32> = match *amount {
                     "off" => None,
                     "on" => Some(0.5),
-                    a => Some(a.parse::<f32>()?.clamp(0.0, 1.0)),
+                    a => Some(finite(a)?.clamp(0.0, 1.0)),
                 };
                 {
                     let mut zoom = self.zoom.lock().unwrap();
@@ -651,14 +655,14 @@ impl Session {
             ["pixelate", amount] => {
                 *self.pixelate.lock().unwrap() = match *amount {
                     "off" => 0.0,
-                    a => a.parse::<f32>()?.clamp(0.0, 100.0) / 100.0,
+                    a => finite(a)?.clamp(0.0, 100.0) / 100.0,
                 };
                 Ok(String::new())
             }
             ["magnify", factor] => {
                 *self.magnify.lock().unwrap() = match *factor {
                     "off" => 1.0,
-                    f => f.parse::<f32>()?.clamp(1.0, 4.0),
+                    f => finite(f)?.clamp(1.0, 4.0),
                 };
                 Ok(String::new())
             }
@@ -671,15 +675,18 @@ impl Session {
                 };
                 Ok(String::new())
             }
+            // Compared with the saved choice, not the mode in use: a USB 2 port, Windows 10 or low power mode can
+            // keep the camera in another mode, and restarting it would not change that.
             ["power", power @ ("low" | "normal")] => {
-                if (*power == "low") != self.low_power {
+                if (*power == "low") != self.settings.lock().unwrap().low_power() {
                     RESTART.store(true, Ordering::Relaxed);
                 }
                 Ok(String::new())
             }
             ["resolution", name] => {
                 let res = Resolution::parse(name).ok_or_else(|| anyhow!("resolution 720p, 1080p, 1440p or 2160p"))?;
-                if res != self.resolution {
+                let saved = self.settings.lock().unwrap();
+                if res != saved.resolution() && !saved.low_power() {
                     RESTART.store(true, Ordering::Relaxed);
                 }
                 Ok(String::new())
@@ -811,6 +818,7 @@ impl Session {
                     "on" => DEFAULT_BLUR,
                     r => r.parse()?,
                 };
+                anyhow::ensure!(radius <= MAX_BLUR, "blur 0 to {MAX_BLUR}");
                 self.blur.lock().unwrap().radius = radius;
                 self.sync_branches()?;
                 Ok(String::new())
@@ -824,9 +832,9 @@ impl Session {
                 self.update(None)?;
                 Ok(String::new())
             }
-            ["snap", path] => self.snap(Path::new(path)).map(|_| String::new()),
+            ["snap", _, ..] => self.snap(Path::new(opal_ipc::tail(line, 1))).map(|_| String::new()),
             ["gain", db] => {
-                let db: f32 = db.parse()?;
+                let db = finite(db)?;
                 let on = {
                     let mut mic = self.mic_state.lock().unwrap();
                     mic.1 = db;
@@ -861,7 +869,7 @@ impl Session {
                 Ok(String::new())
             }
             _ => {
-                let c = parse_control(line).ok_or_else(|| anyhow!("unknown command"))?;
+                let c = parse_control(line)?;
                 self.link.write(self.control, &c.to_packet())?;
                 Ok(String::new())
             }
@@ -882,35 +890,53 @@ impl Session {
 }
 
 /// One control command, e.g. `focus 120` or `exposure 10000 400`.
-fn parse_control(line: &str) -> Option<CameraControl> {
+fn parse_control(line: &str) -> Result<CameraControl> {
     let mut words = line.split_whitespace();
-    let cmd = words.next()?;
+    let cmd = words.next().unwrap_or_default();
+    let mut c = CameraControl::default();
     if cmd == "antibanding" {
         let mode = match (words.next(), words.next()) {
-            (Some(m), None) => crate::mains::mode(m)?,
-            _ => return None,
+            (Some(m), None) => crate::mains::mode(m),
+            _ => None,
         };
-        let mut c = CameraControl::default();
-        c.anti_banding(mode);
-        return Some(c);
+        c.anti_banding(mode.ok_or_else(|| anyhow!("antibanding 50, 60, off or auto"))?);
+        return Ok(c);
     }
-    let args: Vec<i64> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
-    let mut c = CameraControl::default();
-    match (cmd, args.as_slice()) {
-        ("focus", [p]) => c.auto_focus_mode(af::OFF).manual_focus(*p as u8),
-        ("af", []) => c.auto_focus_mode(af::CONTINUOUS_VIDEO).auto_focus_trigger(),
-        ("exposure", [us, iso]) => c.manual_exposure(*us as u32, *iso as u32),
-        ("ae", []) => c.auto_exposure(),
-        ("ev", [v]) => c.exposure_compensation(*v as i8),
-        ("wb", [k]) => c.white_balance(*k as u16),
-        ("awb", []) => c.auto_white_balance(awb::AUTO),
-        ("brightness", [v]) => c.brightness(*v as i8),
-        ("contrast", [v]) => c.contrast(*v as i8),
-        ("saturation", [v]) => c.saturation(*v as i8),
-        ("sharpness", [v]) => c.sharpness(*v as u8),
-        _ => return None,
+    let args: Vec<i64> = words
+        .map(|w| w.parse())
+        .collect::<Result<_, _>>()
+        .map_err(|_| anyhow!("unknown command"))?;
+    // Checked here, as the camera would take a value out of range as some other one.
+    let check = |v: i64, range: std::ops::RangeInclusive<i64>| {
+        anyhow::ensure!(range.contains(&v), "{cmd} {} to {}", range.start(), range.end());
+        Ok(v)
     };
-    Some(c)
+    match (cmd, args.as_slice()) {
+        ("focus", [p]) => c.auto_focus_mode(af::OFF).manual_focus(check(*p, 0..=255)? as u8),
+        ("af", []) => c.auto_focus_mode(af::CONTINUOUS_VIDEO).auto_focus_trigger(),
+        ("exposure", [us, iso]) => {
+            let us = check(*us, 1..=33_333)?;
+            let iso = check(*iso, 100..=1600).map_err(|_| anyhow!("exposure <1 to 33333 us> <100 to 1600 ISO>"))?;
+            c.manual_exposure(us as u32, iso as u32)
+        }
+        ("ae", []) => c.auto_exposure(),
+        ("ev", [v]) => c.exposure_compensation(check(*v, -9..=9)? as i8),
+        ("wb", [k]) => c.white_balance(check(*k, 1000..=12000)? as u16),
+        ("awb", []) => c.auto_white_balance(awb::AUTO),
+        ("brightness", [v]) => c.brightness(check(*v, -10..=10)? as i8),
+        ("contrast", [v]) => c.contrast(check(*v, -10..=10)? as i8),
+        ("saturation", [v]) => c.saturation(check(*v, -10..=10)? as i8),
+        ("sharpness", [v]) => c.sharpness(check(*v, 0..=4)? as u8),
+        _ => anyhow::bail!("unknown command"),
+    };
+    Ok(c)
+}
+
+/// A number that is not NaN or infinite.
+fn finite(v: &str) -> Result<f32> {
+    let v: f32 = v.parse()?;
+    anyhow::ensure!(v.is_finite(), "not a number");
+    Ok(v)
 }
 
 /// A percentage from 0 to 100 as 0 to 1.
@@ -1031,8 +1057,19 @@ fn shrink_nv12(frame: &[u8], w: usize, h: usize, step: usize) -> (Vec<u8>, usize
     (out, sw, sh)
 }
 
+/// Sets the flag to false when dropped.
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 fn handle(session: &Session, stream: opal_ipc::Stream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // A client that stops reading must not hold up the service.
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let line = line.trim();
@@ -1056,17 +1093,14 @@ fn handle(session: &Session, stream: opal_ipc::Stream) -> Result<()> {
 
 /// Starts the pipeline on a booted camera and serves commands until told to stop.
 /// `overrides` are commands applied after the saved settings, without being saved.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: Device,
+    info: DeviceInfo,
     dir: &Path,
-    sensor: &str,
-    resolution: Resolution,
-    low_power: bool,
+    (resolution, low_power): (Resolution, bool),
     output: Option<PathBuf>,
     settings: Settings,
     overrides: &[String],
-    info: DeviceInfo,
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     // In low power mode apps use the camera itself, not the virtual camera.
@@ -1084,7 +1118,7 @@ pub fn run(
         dev.call("setLogLevel", vec![level.into()])?;
     }
     let banding = crate::mains::mode(settings.antibanding()).unwrap_or(antibanding::HZ_60);
-    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution, low_power, banding)?)?;
+    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, &info.sensor, resolution, low_power, banding)?)?;
     let session = Arc::new(Session {
         link: dev.link().clone(),
         control: streams[opal_c1::CONTROL_STREAM],
@@ -1106,7 +1140,7 @@ pub fn run(
             apps: Vec::new(),
             last_consumer: None,
             last_preview: None,
-            last_change: Instant::now() - RESTART_AFTER,
+            last_change: Instant::now().checked_sub(RESTART_AFTER).unwrap_or_else(Instant::now),
             start_frames: 0,
             first_frame: None,
         }),
@@ -1178,6 +1212,8 @@ pub fn run(
     {
         let session = session.clone();
         std::thread::spawn(move || {
+            // Cleared however the loop ends, a panic included, so the session sees the video stop.
+            let _alive = ClearOnDrop(&session.alive);
             let (w, h) = (vw as usize, vh as usize);
             let mut effects = BackgroundBlur::new(w, h);
             let placard = opal_effects::placard(w, h);
@@ -1292,7 +1328,6 @@ pub fn run(
                 session.frames.fetch_add(1, Ordering::Relaxed);
                 std::mem::swap(&mut *session.last_frame.lock().unwrap(), &mut frame);
             }
-            session.alive.store(false, Ordering::Relaxed);
         });
     }
     {
@@ -1455,7 +1490,9 @@ pub fn run(
     let temperature = {
         let (dev, session, done) = (dev.clone(), session.clone(), done.clone());
         std::thread::spawn(move || {
-            let mut last = Instant::now() - TEMPERATURE_PERIOD;
+            let mut last = Instant::now()
+                .checked_sub(TEMPERATURE_PERIOD)
+                .unwrap_or_else(Instant::now);
             while !done.load(Ordering::Relaxed) {
                 std::thread::sleep(POLL);
                 if last.elapsed() >= TEMPERATURE_PERIOD && !session.frozen.load(Ordering::Relaxed) {
@@ -1474,7 +1511,7 @@ pub fn run(
         })
     };
     let screen_lock = crate::platform::ScreenLock::new();
-    let mut last_lock = Instant::now() - LOCK_PERIOD;
+    let mut last_lock = Instant::now().checked_sub(LOCK_PERIOD).unwrap_or_else(Instant::now);
     let mut last_refresh = Instant::now();
     while !crate::stopped() && !RESTART.load(Ordering::Relaxed) {
         // A camera that stopped answering is kept until video is wanted (see `update`).
@@ -1628,9 +1665,22 @@ mod tests {
 
     #[test]
     fn antibanding_commands() {
-        assert!(parse_control("antibanding 50").is_some());
-        assert!(parse_control("antibanding auto").is_some());
-        assert!(parse_control("antibanding 70").is_none());
-        assert!(parse_control("antibanding").is_none());
+        assert!(parse_control("antibanding 50").is_ok());
+        assert!(parse_control("antibanding auto").is_ok());
+        assert!(parse_control("antibanding 70").is_err());
+        assert!(parse_control("antibanding").is_err());
+    }
+
+    #[test]
+    fn control_ranges() {
+        assert!(parse_control("focus 255").is_ok());
+        assert!(parse_control("focus 256").is_err());
+        assert!(parse_control("exposure -1 400").is_err());
+        assert!(parse_control("exposure 10000 400").is_ok());
+        assert!(parse_control("wb 99999").is_err());
+        assert!(parse_control("sharpness 4").is_ok());
+        assert!(parse_control("bogus 1").is_err());
+        assert!(finite("NaN").is_err());
+        assert!(finite("0.5").is_ok());
     }
 }

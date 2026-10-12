@@ -2,4 +2,5 @@
 set -e
 if [ "$1" = remove ]; then
     systemctl --global disable opal-rs.service || true
+    mkdir -p /var/lib/opal-rs && touch /var/lib/opal-rs/removed || true
 fi

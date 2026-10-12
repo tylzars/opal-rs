@@ -164,14 +164,15 @@ pub fn scale(src: &Rgba, height: usize) -> Rgba {
                 y * src.height / height,
                 ((y + 1) * src.height / height).max(y * src.height / height + 1),
             );
-            let mut acc = [0u32; 4];
+            // u64: a big picture shrunk to a small sticker sums many pixels into one.
+            let mut acc = [0u64; 4];
             let mut n = 0;
             for sy in sy0..sy1.min(src.height) {
                 for sx in sx0..sx1.min(src.width) {
                     let p = &src.data[(sy * src.width + sx) * 4..][..4];
-                    let a = p[3] as u32;
+                    let a = p[3] as u64;
                     for c in 0..3 {
-                        acc[c] += p[c] as u32 * a;
+                        acc[c] += p[c] as u64 * a;
                     }
                     acc[3] += a;
                     n += 1;
@@ -182,7 +183,7 @@ pub fn scale(src: &Rgba, height: usize) -> Rgba {
                 for c in 0..3 {
                     o[c] = (acc[c] / acc[3]) as u8;
                 }
-                o[3] = (acc[3] / n) as u8;
+                o[3] = (acc[3] / n as u64) as u8;
             }
         }
     }
@@ -271,6 +272,13 @@ mod tests {
         ]
         .iter()
         .find_map(|p| Font::load(&std::fs::read(p).ok()?))
+    }
+
+    #[test]
+    fn big_picture_shrinks_to_one_pixel() {
+        let mut img = Rgba::new(300, 300);
+        img.data.fill(255);
+        assert_eq!(scale(&img, 1).data, [255, 255, 255, 255]);
     }
 
     #[test]

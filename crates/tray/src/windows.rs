@@ -51,7 +51,9 @@ pub fn run() {
         eprintln!("no notification area available");
         std::process::exit(1);
     };
-    let mut last_poll = Instant::now() - Duration::from_secs(10);
+    let mut last_poll = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or_else(Instant::now);
     let mut shown = None;
     loop {
         // The tray's window lives on this thread, so its messages are handled here.
@@ -74,6 +76,10 @@ pub fn run() {
                 return;
             }
             changed = true;
+        }
+        if changed {
+            // A clicked item toggles its own tick; redraw so it shows the real state.
+            shown = None;
         }
         if changed || last_poll.elapsed() >= Duration::from_secs(2) {
             last_poll = Instant::now();

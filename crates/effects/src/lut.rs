@@ -11,6 +11,8 @@ pub enum Error {
     Parse(usize, String),
     #[error("1D tables are not supported")]
     OneDimensional,
+    #[error("DOMAIN_MAX must be above DOMAIN_MIN")]
+    Domain,
     #[error("expected {expected} entries, found {found}")]
     Size { expected: usize, found: usize },
 }
@@ -27,7 +29,11 @@ pub struct Cube {
 fn floats(words: &[&str], line: usize) -> Result<[f32; 3], Error> {
     let mut v = [0.0; 3];
     for (o, w) in v.iter_mut().zip(words) {
-        *o = w.parse().map_err(|_| Error::Parse(line, format!("bad number {w}")))?;
+        *o = w
+            .parse()
+            .ok()
+            .filter(|v: &f32| v.is_finite())
+            .ok_or_else(|| Error::Parse(line, format!("bad number {w}")))?;
     }
     if words.len() != 3 {
         return Err(Error::Parse(line, "expected three numbers".into()));
@@ -63,6 +69,9 @@ impl Cube {
                     data.push(floats(values, n)?);
                 }
             }
+        }
+        if (0..3).any(|c| domain_max[c] <= domain_min[c]) {
+            return Err(Error::Domain);
         }
         let expected = size * size * size;
         if size == 0 || data.len() != expected {
@@ -270,6 +279,14 @@ mod tests {
         let mut f: Vec<u8> = (0..w * h).map(|i| (60 + i) as u8).collect();
         f.extend((0..w * h / 2).map(|i| (120 + i % 16) as u8));
         f
+    }
+
+    #[test]
+    fn rejects_bad_domain_and_numbers() {
+        let flat = identity(2).replace("LUT_3D_SIZE 2", "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 0 1");
+        assert!(matches!(Cube::parse(&flat), Err(Error::Domain)));
+        let nan = identity(2).replacen("0 0 0", "NaN 0 0", 1);
+        assert!(Cube::parse(&nan).is_err());
     }
 
     #[test]

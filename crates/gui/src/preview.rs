@@ -26,7 +26,7 @@ pub enum Source {
     /// program read it at a time.
     Service,
     /// A video device of `width` x `height` NV12 frames (low power mode, where video does not pass through here).
-    Device(PathBuf, (usize, usize)),
+    Device(Option<PathBuf>, (usize, usize)),
 }
 
 /// Owner side of the preview thread.
@@ -99,9 +99,13 @@ impl Handle {
             };
             let (name, result) = match source {
                 Source::Service => ("the camera service".to_owned(), from_service(&current, &store)),
-                Source::Device(device, (width, height)) => (
+                Source::Device(Some(device), (width, height)) => (
                     device.display().to_string(),
                     from_device(&device, width, height, &current, &store),
+                ),
+                Source::Device(None, _) => (
+                    "the camera".to_owned(),
+                    Err(std::io::Error::other("not found; is it plugged in?")),
                 ),
             };
             let mut s = shared.lock().unwrap();
@@ -154,7 +158,9 @@ fn from_device(
     let step = (width / PREVIEW_WIDTH).max(1);
     let size = [width / step, height / step];
     let mut cap = opal_v4l2::Capture::open(device, width as u32, height as u32, opal_v4l2::NV12)?;
-    let mut last = Instant::now() - Duration::from_secs(1);
+    let mut last = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
     while current() {
         let rgb = cap.next(Duration::from_secs(5), |f| {
             (last.elapsed() > FETCH_PERIOD && f.data.len() >= width * height * 3 / 2)
@@ -215,20 +221,18 @@ fn nv12_to_rgb_small(frame: &[u8], width: usize, height: usize, step: usize) -> 
     out
 }
 
-/// The camera's own video device, used in low power mode.
-pub fn camera_node() -> PathBuf {
+/// The camera's own video device, used in low power mode: the booted C1 (03e7:f63b).
+pub fn camera_node() -> Option<PathBuf> {
     std::fs::read_dir("/sys/class/video4linux")
-        .into_iter()
-        .flatten()
+        .ok()?
         .flatten()
         .find(|e| {
             let read = |f: &str| std::fs::read_to_string(e.path().join(f)).map(|s| s.trim().to_owned());
-            read("index").is_ok_and(|i| i == "0") && read("device/../idVendor").is_ok_and(|v| v == "03e7")
+            read("index").is_ok_and(|i| i == "0")
+                && read("device/../idVendor").is_ok_and(|v| v == "03e7")
+                && read("device/../idProduct").is_ok_and(|p| p == "f63b")
         })
-        .map_or_else(
-            || PathBuf::from("/dev/video0"),
-            |e| PathBuf::from("/dev").join(e.file_name()),
-        )
+        .map(|e| PathBuf::from("/dev").join(e.file_name()))
 }
 
 #[cfg(test)]

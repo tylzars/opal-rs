@@ -58,4 +58,4 @@ opal-v4l2 = { version = "0.1.0", path = "../v4l2" }
 
 [target.'cfg(windows)'.dependencies]
 opal-vcam = { version = "0.1.0", path = "../vcam" }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation"] }

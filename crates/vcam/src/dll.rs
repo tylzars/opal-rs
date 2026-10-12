@@ -211,7 +211,7 @@ impl IMFAttributes_Impl for Activate_Impl {
     }
     fn GetString(&self, key: *const GUID, value: PWSTR, size: u32, len: *mut u32) -> Result<()> {
         unsafe {
-            let buf = std::slice::from_raw_parts_mut(value.0, size as usize);
+            let buf = slice_mut(value.0, size);
             self.attributes.GetString(key, buf, Some(len))
         }
     }
@@ -223,7 +223,7 @@ impl IMFAttributes_Impl for Activate_Impl {
     }
     fn GetBlob(&self, key: *const GUID, buf: *mut u8, size: u32, len: *mut u32) -> Result<()> {
         unsafe {
-            let buf = std::slice::from_raw_parts_mut(buf, size as usize);
+            let buf = slice_mut(buf, size);
             self.attributes.GetBlob(key, buf, Some(len))
         }
     }
@@ -261,10 +261,7 @@ impl IMFAttributes_Impl for Activate_Impl {
         unsafe { self.attributes.SetString(key, *value) }
     }
     fn SetBlob(&self, key: *const GUID, buf: *const u8, size: u32) -> Result<()> {
-        unsafe {
-            self.attributes
-                .SetBlob(key, std::slice::from_raw_parts(buf, size as usize))
-        }
+        unsafe { self.attributes.SetBlob(key, slice(buf, size)) }
     }
     fn SetUnknown(&self, key: *const GUID, value: Ref<IUnknown>) -> Result<()> {
         unsafe { self.attributes.SetUnknown(key, value.as_ref()) }
@@ -283,5 +280,22 @@ impl IMFAttributes_Impl for Activate_Impl {
     }
     fn CopyAllItems(&self, dest: Ref<IMFAttributes>) -> Result<()> {
         unsafe { self.attributes.CopyAllItems(dest.as_ref()) }
+    }
+}
+
+/// A caller's buffer; a null one, which callers may pass with no room, is empty.
+unsafe fn slice_mut<'a, T>(ptr: *mut T, len: u32) -> &'a mut [T] {
+    if ptr.is_null() || len == 0 {
+        &mut []
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(ptr, len as usize) }
+    }
+}
+
+unsafe fn slice<'a, T>(ptr: *const T, len: u32) -> &'a [T] {
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
     }
 }

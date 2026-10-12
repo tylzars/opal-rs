@@ -11,5 +11,9 @@ if [ "$1" = configure ]; then
     elif [ ! -e /dev/video10 ]; then
         echo "opal-rs: v4l2loopback is already loaded with other settings; restart the computer for the Opal C1 Virtual camera."
     fi
-    systemctl --global enable opal-rs.service || true
+    # Enabled on a first install and after a removal; an upgrade keeps what the administrator chose.
+    if [ -z "$2" ] || [ -e /var/lib/opal-rs/removed ]; then
+        systemctl --global enable opal-rs.service || true
+        rm -f /var/lib/opal-rs/removed
+    fi
 fi

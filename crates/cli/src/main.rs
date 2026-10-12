@@ -169,7 +169,8 @@ fn firmware_asset() -> &'static Asset {
 fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
     let start = Instant::now();
     loop {
-        if let Some(d) = opal_xlink::list()?.into_iter().next() {
+        // Listing can fail for a moment while a device is being plugged in; that is the same as not found yet.
+        if let Some(d) = opal_xlink::list().ok().and_then(|l| l.into_iter().next()) {
             return Ok(Some(d));
         }
         if start.elapsed() > timeout || stopped() {
@@ -182,8 +183,48 @@ fn wait_for_camera(timeout: Duration) -> Result<Option<opal_xlink::Found>> {
 /// Each boot makes the camera drop off USB and come back a few times, so boots are spaced out.
 const MIN_BOOT_INTERVAL: Duration = Duration::from_secs(60);
 
-fn boot_stamp() -> PathBuf {
-    std::env::temp_dir().join("opal-rs-last-boot")
+/// Marks of the last boot: this user's, and one shared by all users that the first to boot creates.
+fn boot_stamps() -> [PathBuf; 2] {
+    [
+        platform::data_dir().join("last-boot"),
+        std::env::temp_dir().join("opal-rs-last-boot"),
+    ]
+}
+
+/// Time since the camera was last booted, by any of the marks.
+fn since_boot() -> Option<Duration> {
+    boot_stamps()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .map(|t| t.elapsed().unwrap_or_default())
+        .min()
+}
+
+fn mark_boot() -> Result<()> {
+    let [own, shared] = boot_stamps();
+    std::fs::create_dir_all(platform::data_dir())?;
+    std::fs::write(&own, b"").with_context(|| own.display().to_string())?;
+    // Belongs to whoever made it first; the others can still read its time.
+    let _ = std::fs::write(shared, b"");
+    Ok(())
+}
+
+/// Held while this process may boot or use the camera, so a second opal-rs of the same user cannot reboot it.
+fn lock_camera() -> Result<std::fs::File> {
+    let dir = platform::data_dir();
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("camera.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!("opal-rs is already using the camera; `opal-rs ctl quit` stops the service")
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
 }
 
 /// Restarts after the camera goes away are limited, so a camera that keeps failing is left alone.
@@ -200,11 +241,7 @@ fn sleep_unless_stopped(d: Duration) {
 
 /// Time left before another boot is allowed.
 fn boot_wait() -> Duration {
-    std::fs::metadata(boot_stamp())
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map_or(Duration::ZERO, |since| MIN_BOOT_INTERVAL.saturating_sub(since))
+    since_boot().map_or(Duration::ZERO, |since| MIN_BOOT_INTERVAL.saturating_sub(since))
 }
 
 fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings, overrides: &[String]) -> Result<()> {
@@ -220,8 +257,8 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     };
     let booted = boot(dir, low_power)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
-    let sensor = sensor_name(&dev)?;
-    let info = device_info(&dev);
+    let info = device_info(&dev)?;
+    let sensor = &info.sensor;
     let slow_usb = matches!(info.usb.as_str(), "low" | "full" | "high");
     // Low power mode streams 1080p, as the camera's own USB video has no other size.
     let resolution = if low_power {
@@ -240,12 +277,12 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
         resolution.name(),
         if low_power { " low power" } else { "" }
     );
-    daemon::run(
-        dev, dir, &sensor, resolution, low_power, output, settings, overrides, info,
-    )
+    daemon::run(dev, info, dir, (resolution, low_power), output, settings, overrides)
 }
 
-fn device_info(dev: &Device) -> daemon::DeviceInfo {
+fn device_info(dev: &Device) -> Result<daemon::DeviceInfo> {
+    // Asked first: this is the order of calls tested on the camera.
+    let sensor = sensor_name(dev)?;
     use opal_dai::msgpack::Value;
     let serial = match dev.call("getMxId", vec![]) {
         Ok(Value::Str(s)) => s,
@@ -262,18 +299,18 @@ fn device_info(dev: &Device) -> daemon::DeviceInfo {
     // The firmware file name ends in its commit.
     let name = firmware_asset().file_name.trim_end_matches(".cmd");
     let firmware = name.rsplit('-').next().unwrap_or(name);
-    daemon::DeviceInfo {
+    Ok(daemon::DeviceInfo {
+        sensor,
         serial,
         usb: (*usb).into(),
         firmware: firmware[..firmware.len().min(8)].into(),
-    }
+    })
 }
 
 fn check_boot_interval() -> Result<()> {
-    let Ok(modified) = std::fs::metadata(boot_stamp()).and_then(|m| m.modified()) else {
+    let Some(since) = since_boot() else {
         return Ok(());
     };
-    let since = modified.elapsed().unwrap_or_default();
     if since < MIN_BOOT_INTERVAL {
         anyhow::bail!(
             "camera was booted {}s ago, wait {}s",
@@ -288,7 +325,7 @@ fn check_boot_interval() -> Result<()> {
 fn boot(dir: &Path, usb_video: bool) -> Result<opal_xlink::Found> {
     let device = wait_for_camera(Duration::from_secs(20))?.context("no camera found")?;
     check_boot_interval()?;
-    std::fs::write(boot_stamp(), b"")?;
+    mark_boot()?;
     let firmware = opal_assets::load(dir, firmware_asset())?;
     let config = BoardConfig {
         uvc_enable: Some(usb_video),
@@ -340,11 +377,13 @@ fn main() -> Result<ExitCode> {
             }
         },
         Command::Boot => {
+            let _lock = lock_camera()?;
             let booted = boot(&dir, false)?;
             println!("{:?} {:04x}", booted.state, booted.state.pid());
             Ok(ExitCode::SUCCESS)
         }
         Command::Info => {
+            let _lock = lock_camera()?;
             let booted = boot(&dir, false)?;
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             for method in [
@@ -363,6 +402,7 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Webcam { flicker } => {
+            let _lock = lock_camera()?;
             webcam::run(&dir, &flicker)?;
             Ok(ExitCode::SUCCESS)
         }
@@ -372,6 +412,7 @@ fn main() -> Result<ExitCode> {
             lut,
             settings,
         } => {
+            let _lock = lock_camera()?;
             on_stop()?;
             let settings_path = settings.unwrap_or_else(settings::default_path);
             let settings = settings::Settings::load(&settings_path);

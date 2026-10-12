@@ -16,6 +16,10 @@ impl Stream {
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(t)
     }
+
+    pub fn set_write_timeout(&self, t: Option<Duration>) -> io::Result<()> {
+        self.0.set_write_timeout(t)
+    }
 }
 
 impl Read for Stream {
@@ -146,6 +150,9 @@ pub fn request(command: &str, timeout: Duration) -> io::Result<String> {
     Ok(reply.trim_end().to_owned())
 }
 
+/// Largest binary reply taken, well above a 4K frame.
+const MAX_DATA: usize = 64 << 20;
+
 /// Sends one command whose reply is binary: a line `bytes <n> <words...>` and then n bytes. Returns the words and
 /// the bytes; any other reply line comes back as an error.
 pub fn request_data(command: &str, timeout: Duration) -> io::Result<(String, Vec<u8>)> {
@@ -160,7 +167,11 @@ pub fn request_data(command: &str, timeout: Duration) -> io::Result<(String, Vec
         .strip_prefix("bytes ")
         .ok_or_else(|| io::Error::other(line.trim_end().to_owned()))?;
     let (n, words) = rest.split_once(' ').unwrap_or((rest, ""));
-    let n: usize = n.parse().map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let n: usize = n
+        .parse()
+        .ok()
+        .filter(|&n| n <= MAX_DATA)
+        .ok_or(io::ErrorKind::InvalidData)?;
     let mut data = vec![0u8; n];
     reader.read_exact(&mut data)?;
     Ok((words.to_owned(), data))

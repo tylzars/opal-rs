@@ -1,8 +1,9 @@
-//! Mains frequency guessed from the time zone, for anti-banding.
+//! Mains frequency guessed from the time zone (Linux) or the region (Windows), for anti-banding.
 
 use opal_dai::message::antibanding;
 
 /// Zones on 60 Hz mains outside the Americas.
+#[cfg(any(unix, test))]
 const HZ_60: &[&str] = &[
     "Asia/Taipei",
     "Asia/Seoul",
@@ -21,6 +22,7 @@ const HZ_60: &[&str] = &[
 ];
 
 /// Zones in the Americas on 50 Hz mains.
+#[cfg(any(unix, test))]
 const AMERICAS_50: &[&str] = &[
     "America/Argentina/",
     "America/Buenos_Aires",
@@ -44,7 +46,8 @@ const AMERICAS_50: &[&str] = &[
 ];
 
 /// 50 or 60 for an IANA zone name such as `Europe/Paris`.
-pub fn hz_for_zone(zone: &str) -> u32 {
+#[cfg(any(unix, test))]
+fn hz_for_zone(zone: &str) -> u32 {
     let americas = ["America/", "US/", "Canada/", "Brazil/", "Mexico/"]
         .iter()
         .any(|p| zone.starts_with(p));
@@ -55,7 +58,40 @@ pub fn hz_for_zone(zone: &str) -> u32 {
     }
 }
 
+/// Countries on 60 Hz mains, by ISO 3166 code.
+#[cfg(any(windows, test))]
+const COUNTRIES_60: &[&str] = &[
+    "US", "CA", "MX", "GT", "BZ", "SV", "HN", "NI", "CR", "PA", "CU", "DO", "HT", "BS", "PR", "VI", "VG", "KY", "TC",
+    "AG", "KN", "AW", "TT", "BM", "CO", "VE", "EC", "PE", "BR", "GY", "SR", "TW", "KR", "PH", "SA", "LR", "GU", "MP",
+    "AS", "MH", "PW", "FM",
+];
+
+/// 50 or 60 for a two-letter country code.
+#[cfg(any(windows, test))]
+fn hz_for_country(code: &str) -> u32 {
+    if COUNTRIES_60.contains(&code) { 60 } else { 50 }
+}
+
+/// Mains frequency where this computer is, if it can tell.
+#[cfg(unix)]
+fn local_hz() -> Option<u32> {
+    local_zone()
+        .filter(|z| z.contains('/') && !z.starts_with("Etc/"))
+        .map(|z| hz_for_zone(&z))
+}
+
+/// From the region set in Windows' settings.
+#[cfg(windows)]
+fn local_hz() -> Option<u32> {
+    let mut name = [0u16; 16];
+    let n = unsafe { windows_sys::Win32::Globalization::GetUserDefaultGeoName(name.as_mut_ptr(), name.len() as i32) };
+    // Two letters; a region without a country is given as digits.
+    let code = String::from_utf16_lossy(name.get(..(n as usize).saturating_sub(1))?);
+    (code.len() == 2 && code.bytes().all(|b| b.is_ascii_uppercase())).then(|| hz_for_country(&code))
+}
+
 /// The local zone name, from `TZ`, `/etc/localtime` or `/etc/timezone`.
+#[cfg(unix)]
 fn local_zone() -> Option<String> {
     if let Ok(tz) = std::env::var("TZ") {
         let tz = tz.trim_start_matches(':');
@@ -74,16 +110,13 @@ fn local_zone() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Anti-banding mode for `antibanding off|50|60|auto`. Auto goes by the time zone, 60 Hz if it is unknown or UTC.
+/// Anti-banding mode for `antibanding off|50|60|auto`. Auto goes by where the computer is, 60 Hz if unknown.
 pub fn mode(setting: &str) -> Option<u8> {
     Some(match setting {
         "off" => antibanding::OFF,
         "50" => antibanding::HZ_50,
         "60" => antibanding::HZ_60,
-        "auto" => match local_zone()
-            .filter(|z| z.contains('/') && !z.starts_with("Etc/"))
-            .map_or(60, |z| hz_for_zone(&z))
-        {
+        "auto" => match local_hz().unwrap_or(60) {
             50 => antibanding::HZ_50,
             _ => antibanding::HZ_60,
         },
@@ -106,5 +139,13 @@ mod tests {
         assert_eq!(hz_for_zone("Asia/Seoul"), 60);
         assert_eq!(hz_for_zone("Pacific/Honolulu"), 60);
         assert_eq!(hz_for_zone("Australia/Sydney"), 50);
+    }
+
+    #[test]
+    fn countries() {
+        assert_eq!(hz_for_country("US"), 60);
+        assert_eq!(hz_for_country("KR"), 60);
+        assert_eq!(hz_for_country("DE"), 50);
+        assert_eq!(hz_for_country("AR"), 50);
     }
 }
