@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -83,7 +83,33 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     cond: Condvar,
-    writer: Mutex<Writer>,
+    /// Header and payload for the writer thread. The reader must never wait on USB writes, or the device can stall
+    /// sending to us while we stall sending to it.
+    out: mpsc::Sender<([u8; HEADER_LEN], Vec<u8>)>,
+}
+
+fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; HEADER_LEN], Vec<u8>)>) {
+    loop {
+        let (header, payload) = match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(m) => m,
+            Err(mpsc::RecvTimeoutError::Timeout) if shared.state.lock().unwrap().closed.is_none() => continue,
+            Err(_) => break,
+        };
+        let result = writer.write_all(&header).and_then(|_| {
+            if payload.is_empty() {
+                Ok(())
+            } else {
+                writer.write_all(&payload)
+            }
+        });
+        if let Err(e) = result {
+            let mut st = shared.state.lock().unwrap();
+            st.closed.get_or_insert_with(|| e.to_string());
+            drop(st);
+            shared.cond.notify_all();
+            break;
+        }
+    }
 }
 
 static NEXT_ID: AtomicI32 = AtomicI32::new(0xa);
@@ -117,15 +143,21 @@ impl Link {
     /// Claims interface 0, starts the reader and pings the device.
     pub fn connect(info: &nusb::DeviceInfo, timeout: Duration) -> Result<Self, Error> {
         let (reader, writer) = usb::open(info)?;
+        let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             cond: Condvar::new(),
-            writer: Mutex::new(writer),
+            out: tx,
         });
         let s = shared.clone();
         thread::Builder::new()
             .name("xlink-reader".into())
             .spawn(move || read_loop(s, reader))
+            .map_err(io::Error::other)?;
+        let s = shared.clone();
+        thread::Builder::new()
+            .name("xlink-writer".into())
+            .spawn(move || write_loop(s, writer, rx))
             .map_err(io::Error::other)?;
         let link = Self { shared };
         let ping = Header {
@@ -139,12 +171,10 @@ impl Link {
     }
 
     fn send(&self, h: &Header, payload: &[u8]) -> Result<(), Error> {
-        let mut w = self.shared.writer.lock().unwrap();
-        w.write_all(&h.encode())?;
-        if !payload.is_empty() {
-            w.write_all(payload)?;
-        }
-        Ok(())
+        self.shared
+            .out
+            .send((h.encode(), payload.to_vec()))
+            .map_err(|_| Error::Closed("writer stopped".into()))
     }
 
     fn request(&self, h: Header, payload: &[u8], timeout: Option<Duration>) -> Result<Header, Error> {
@@ -314,7 +344,7 @@ fn reply(shared: &Shared, req: &Header, stream: u32, size: u32, name: &str, flag
         size,
         flags,
     };
-    let _ = shared.writer.lock().unwrap().write_all(&h.encode());
+    let _ = shared.out.send((h.encode(), Vec::new()));
 }
 
 fn read_loop(shared: Arc<Shared>, mut reader: Reader) {

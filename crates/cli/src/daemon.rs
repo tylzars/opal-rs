@@ -20,9 +20,11 @@ use crate::settings::Settings;
 
 /// How long the camera keeps streaming after the last app closes the output.
 const OFF_DELAY: Duration = Duration::from_secs(2);
-/// Shortest time between starting and stopping the camera. It takes a moment to produce frames after a start,
-/// and stopping it before then hangs the firmware.
-const MIN_HOLD: Duration = Duration::from_secs(5);
+/// The camera takes a few seconds to produce frames after a start, and stopping it before then can bring the
+/// firmware down. So it is only stopped once frames have been coming for this long.
+const STOP_AFTER: Duration = Duration::from_secs(2);
+/// Shortest time from a stop to the next start.
+const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
 const TEMPERATURE_PERIOD: Duration = Duration::from_secs(5);
 /// Blur radius for `blur on`, in frame pixels.
@@ -69,6 +71,9 @@ struct State {
     consumers: usize,
     last_consumer: Option<Instant>,
     last_change: Instant,
+    /// Frame count when streaming last started, and when the first frame after that arrived.
+    start_frames: u64,
+    first_frame: Option<Instant>,
 }
 
 /// Background blur settings and the latest person mask.
@@ -162,10 +167,18 @@ struct Session {
 
 impl Session {
     fn set_streaming(&self, st: &mut State, on: bool) -> Result<()> {
-        if st.streaming == on || st.last_change.elapsed() < MIN_HOLD {
+        if st.streaming == on {
+            return Ok(());
+        }
+        if on && st.last_change.elapsed() < RESTART_AFTER {
+            return Ok(());
+        }
+        if !on && !st.first_frame.is_some_and(|t| t.elapsed() >= STOP_AFTER) {
             return Ok(());
         }
         if on {
+            st.start_frames = self.frames.load(Ordering::Relaxed);
+            st.first_frame = None;
             self.link.write(self.control, &opal_c1::start_control().to_packet())?;
             self.link.write(self.led, &Led::White.packet())?;
             for c in self.settings.lock().unwrap().camera_commands() {
@@ -184,6 +197,9 @@ impl Session {
 
     fn update(&self, consumers: Option<usize>) -> Result<()> {
         let mut st = self.state.lock().unwrap();
+        if st.streaming && st.first_frame.is_none() && self.frames.load(Ordering::Relaxed) > st.start_frames {
+            st.first_frame = Some(Instant::now());
+        }
         if let Some(n) = consumers {
             st.consumers = n;
             if n > 0 {
@@ -508,10 +524,12 @@ pub fn run(
         output: output.clone(),
         state: Mutex::new(State {
             mode: Mode::Auto,
-            streaming: true,
+            streaming: false,
             consumers: 0,
             last_consumer: None,
-            last_change: Instant::now(),
+            last_change: Instant::now() - RESTART_AFTER,
+            start_frames: 0,
+            first_frame: None,
         }),
         blur: Mutex::new(Blur::default()),
         look: Mutex::new(None),
@@ -527,10 +545,7 @@ pub fn run(
         last_frame: Mutex::new(Vec::new()),
         alive: AtomicBool::new(true),
     });
-    session
-        .link
-        .write(session.control, &opal_c1::start_control().to_packet())?;
-    session.link.write(session.led, &Led::White.packet())?;
+    session.link.write(session.led, &Led::Off.packet())?;
     let pause = NnConfig { process_inputs: false };
     session.link.write(session.seg_ctrl, &pause.to_packet())?;
     session.link.write(session.face_ctrl, &pause.to_packet())?;
