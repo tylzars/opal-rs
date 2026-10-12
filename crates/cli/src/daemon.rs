@@ -364,7 +364,7 @@ impl Session {
              frames {} blur {radius} background {background} masks {masks} person {person:.2} lut {look} \
              adjust {adjust} zoom {zoom} gestures {hands} mic {mic} video {video} locked {locked} responding {} \
              magnify {magnify:.2} pixelate {pixelate:.0} touchup {touchup:.0} stickers {stickers} loop {clip} \
-             usb {} serial {} firmware {} apps {apps}",
+             usb {} serial {} firmware {} virtualcam {} apps {apps}",
             if self.low_power { "low" } else { "normal" },
             self.resolution.name(),
             self.frames.load(Ordering::Relaxed),
@@ -376,6 +376,7 @@ impl Session {
             self.info.usb,
             self.info.serial,
             self.info.firmware,
+            if virtual_camera_available() { "yes" } else { "no" },
         )
     }
 
@@ -972,6 +973,14 @@ fn is_effect(command: &str) -> bool {
     )
 }
 
+/// False on Windows 10, which has no virtual camera.
+fn virtual_camera_available() -> bool {
+    #[cfg(windows)]
+    return opal_vcam::host::available();
+    #[cfg(unix)]
+    true
+}
+
 /// Largest preview width; the latest frame is averaged down to about this.
 const PREVIEW_WIDTH: usize = 640;
 
@@ -1065,7 +1074,12 @@ pub fn run(
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     // In low power mode apps use the camera itself, not the virtual camera.
-    let (outputs, _registration) = match crate::output::open(output.filter(|_| !low_power), vw as usize, vh as usize)? {
+    let opened = if low_power {
+        None
+    } else {
+        crate::output::open(output, vw as usize, vh as usize)?
+    };
+    let (outputs, _registration) = match opened {
         Some((o, r)) => (Some(o), Some(r)),
         None => (None, None),
     };

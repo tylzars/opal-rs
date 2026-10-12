@@ -209,6 +209,15 @@ fn boot_wait() -> Duration {
 
 fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings, overrides: &[String]) -> Result<()> {
     let low_power = settings.low_power();
+    // Windows 10 has no virtual camera, so apps get the camera's own video there.
+    #[cfg(windows)]
+    let low_power = low_power || {
+        let missing = !opal_vcam::host::available();
+        if missing {
+            println!("this Windows has no virtual camera (Windows 11 is needed); using low power mode");
+        }
+        missing
+    };
     let booted = boot(dir, low_power)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = sensor_name(&dev)?;
@@ -556,6 +565,10 @@ fn camera_command(command: Option<CamerasCommand>) -> Result<ExitCode> {
 
 #[cfg(windows)]
 fn camera_command(_: Option<CamerasCommand>) -> Result<ExitCode> {
-    println!("Windows shares a camera between apps itself, so there is one camera, Opal C1 Virtual.");
+    if opal_vcam::host::available() {
+        println!("Windows shares a camera between apps itself, so there is one camera, Opal C1 Virtual.");
+    } else {
+        println!("This Windows has no virtual camera (Windows 11 is needed); apps use the camera's own picture.");
+    }
     Ok(ExitCode::SUCCESS)
 }

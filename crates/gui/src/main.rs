@@ -413,6 +413,10 @@ impl App {
         {
             self.c.zoom = z != "off";
         }
+        // Windows 10 has no virtual camera, so the service runs in low power mode there.
+        if self.status_value("virtualcam") == Some("no") {
+            self.c.low_power = true;
+        }
         // The microphone can be switched elsewhere too.
         if let Some(m) = self.status_value("mic") {
             self.c.mic = m != "off";

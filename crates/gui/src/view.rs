@@ -1138,6 +1138,7 @@ fn look_row(ui: &mut Ui, c: &mut Controls, v: &mut State, cmds: &mut Vec<String>
 fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     let info = |k| app.status_value(k).map(str::to_owned);
     let (usb, serial, firmware) = (info("usb"), info("serial"), info("firmware"));
+    let no_virtual = app.status_value("virtualcam") == Some("no");
     let (c, mode) = (&mut app.c, &mut app.mode);
     card(ui, "", |ui| {
         if matches!(usb.as_deref(), Some("low" | "full" | "high")) {
@@ -1186,7 +1187,13 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
-        if theme::switch_row(
+        if no_virtual {
+            hint(
+                ui,
+                "Low power mode is always on here: this Windows has no virtual camera (Windows 11 is needed), so apps \
+                 get the camera's own picture, without effects.",
+            );
+        } else if theme::switch_row(
             ui,
             "Low power mode",
             "Changing this restarts the camera.",

@@ -15,6 +15,7 @@ payload = []
 
 [target.'cfg(windows)'.dependencies]
 opal-ipc = { version = "0.1.0", path = "../ipc" }
+opal-vcam = { version = "0.1.0", path = "../vcam" }
 windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

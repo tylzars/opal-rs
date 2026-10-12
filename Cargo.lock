@@ -3015,6 +3015,7 @@ name = "opal-setup"
 version = "0.1.0"
 dependencies = [
  "opal-ipc",
+ "opal-vcam",
  "windows",
  "windows-core",
 ]

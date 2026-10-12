@@ -12,6 +12,9 @@ const EP_IN: u8 = 0x81;
 const MAX_TRANSFER: usize = 1 << 20;
 /// Reads kept queued at once while a large packet comes in, so the next is ready the moment one completes.
 const READ_DEPTH: usize = 4;
+/// Windows starts the interface's driver a moment after the device appears, so opening is retried for this long
+/// there. Well under the camera's 10 s watchdog, which resets it if nobody connects.
+const OPEN_WAIT: Duration = Duration::from_secs(5);
 const CLEAR_FEATURE: u8 = 1;
 const U1_ENABLE: u16 = 48;
 const U2_ENABLE: u16 = 49;
@@ -27,9 +30,26 @@ pub struct Writer {
     ep: nusb::Endpoint<Bulk, Out>,
 }
 
+fn claim(info: &nusb::DeviceInfo) -> io::Result<(nusb::Device, nusb::Interface)> {
+    let start = std::time::Instant::now();
+    loop {
+        let result = info
+            .open()
+            .wait()
+            .and_then(|d| Ok((d.detach_and_claim_interface(0).wait()?, d)));
+        match result {
+            Ok((iface, device)) => return Ok((device, iface)),
+            Err(_) if cfg!(windows) && start.elapsed() < OPEN_WAIT => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 pub fn open(info: &nusb::DeviceInfo) -> io::Result<(Reader, Writer)> {
-    let device = info.open().wait()?;
-    let iface = device.detach_and_claim_interface(0).wait()?;
+    let (device, iface) = claim(info)?;
+    // Windows sends these through the interface.
+    #[cfg(windows)]
+    let _ = &device;
     // With the USB 3 link allowed into its low power states, the camera stopped sending after a few minutes
     // without video. Keep the link awake; best effort, as not every host passes these on.
     for feature in [U1_ENABLE, U2_ENABLE] {

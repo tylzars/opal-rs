@@ -23,6 +23,10 @@ const TITLE: &str = "Opal C1 setup";
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\opal-rs";
 const SETUP: &str = "opal-rs-setup.exe";
+/// A program that was just stopped holds its file for a moment, so a busy file is tried again for this long.
+const BUSY_WAIT: Duration = Duration::from_secs(5);
+/// Windows' "file in use by another process".
+const SHARING_VIOLATION: i32 = 32;
 /// What is installed, in this order.
 const FILES: [&str; 4] = ["opal-rs.exe", "opal-rs-gui.exe", "opal-rs-tray.exe", "opal_vcam.dll"];
 
@@ -96,9 +100,18 @@ fn install() -> Result<(), String> {
     stop_running();
     for name in FILES {
         let to = dir.join(name);
-        let written = match payload(name) {
+        let write = || match payload(name) {
             Some(bytes) => std::fs::write(&to, bytes),
             None => std::fs::copy(source_dir.join(name), &to).map(drop),
+        };
+        let start = Instant::now();
+        let written = loop {
+            match write() {
+                Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) && start.elapsed() < BUSY_WAIT => {
+                    std::thread::sleep(Duration::from_millis(250))
+                }
+                r => break r,
+            }
         };
         if let Err(e) = written {
             return Err(if name == "opal_vcam.dll" {
@@ -147,9 +160,18 @@ fn install() -> Result<(), String> {
     if let Err(e) = make_shortcut(&dir.join("opal-rs-gui.exe"), &shortcut()) {
         eprintln!("Start menu entry: {e}");
     }
+    // Registered anyway, so the camera appears once Windows is upgraded.
+    let windows10 = if opal_vcam::host::available() {
+        ""
+    } else {
+        "\n\nThis Windows has no virtual camera (Windows 11 is needed), so apps get the camera's own picture, \
+         without effects."
+    };
     let start = message(
-        "Opal C1 is installed. It starts when you sign in.\n\nStart it now? The control panel will ask for the \
-         Opal Composer disk image the first time.",
+        &format!(
+            "Opal C1 is installed. It starts when you sign in.{windows10}\n\nStart it now? The control panel will \
+             ask for the Opal Composer disk image the first time."
+        ),
         MB_YESNO | MB_ICONINFORMATION,
     );
     if start {
