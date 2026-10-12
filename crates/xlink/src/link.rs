@@ -468,21 +468,12 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
                 if shared.ending.load(Ordering::Relaxed) {
                     continue;
                 }
-                // A device that goes quiet may be stuck sending to us: queue fresh reads, then clear the pipe.
+                // A device that goes quiet may be stuck sending to us: queue fresh reads, and say what came last.
                 quiet += 1;
+                eprintln!("xlink: nothing from the device for {}s", quiet * QUIET_STEP.as_secs());
                 if quiet == 2 {
                     eprintln!("xlink: last packets and stream state:\n{}", dump(&shared));
                 }
-                let cleared = if quiet == 4 { Some(reader.clear_halt()) } else { None };
-                eprintln!(
-                    "xlink: nothing from the device for {}s{}",
-                    quiet * QUIET_STEP.as_secs(),
-                    match cleared {
-                        Some(Ok(())) => ", cleared the receive pipe".to_owned(),
-                        Some(Err(e)) => format!(", clearing the receive pipe failed: {e}"),
-                        None => String::new(),
-                    }
-                );
                 continue;
             }
             Err(e) => break e.to_string(),

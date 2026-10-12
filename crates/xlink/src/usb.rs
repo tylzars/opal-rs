@@ -113,11 +113,6 @@ impl Reader {
         }
         self.queued = 0;
     }
-
-    /// Clears a stall on the receive pipe. Needs no reads queued: call after a timed out read.
-    pub fn clear_halt(&mut self) -> io::Result<()> {
-        self.ep.clear_halt().wait().map_err(io::Error::other)
-    }
 }
 
 impl Writer {

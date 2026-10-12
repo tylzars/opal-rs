@@ -115,9 +115,10 @@ panel and no service yet. `list`, `info` and `assets` work too.
    ```
 2. Put `opal-rs.exe` in a folder with an `assets` folder next to it, put the disk image in `assets`, and run
    `opal-rs assets extract`. (Or point `OPAL_RS_ASSETS` at a folder holding the camera files.)
-3. The camera's data link (interface 0) needs the WinUSB driver. If `opal-rs list` shows no camera, install WinUSB
-   for interface 0 with [Zadig](https://zadig.akeo.ie/) (Options > List All Devices). The camera shows up under
-   more than one USB id while it boots, so this may be needed for each. Leave the video and audio interfaces alone.
+3. The camera asks Windows for the WinUSB driver on its data link (interface 0) in every state it boots through, so
+   Windows 8 and later install it on their own. Only if `opal-rs list` shows no camera, install WinUSB for interface
+   0 with [Zadig](https://zadig.akeo.ie/) (Options > List All Devices), for each USB id the camera shows up under.
+   Leave the video and audio interfaces alone.
 4. Run `opal-rs webcam` and pick "Opal C1" in your app.
 
 ## Tests
