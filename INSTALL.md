@@ -1,11 +1,40 @@
 # Installing
 
-## Requirements
-- Linux, or Windows 11: see [Windows](#windows-not-yet-tried-on-a-real-machine)
+## Quick install
+No Rust and no terminal setup: one package or installer, then the control panel asks for your own copy of the Opal
+Composer disk image the first time it opens. It has a button that opens Opal's download page; download
+`Opal_Composer_2.0.0_24.dmg` there and choose it. The camera files are copied out of it on your computer (Linux:
+`~/.local/share/opal-rs/assets`, Windows: `%LOCALAPPDATA%\opal-rs\assets`).
+
+The package and the installer are made as described in [Building the packages](#building-the-packages).
+
+### Ubuntu or Debian (Ubuntu 24.04, Debian 13 or newer)
+```shell
+sudo apt install ./opal-rs_0.1.0-1_amd64.deb
+```
+This also installs `v4l2loopback-dkms` for the "Opal C1 Virtual" camera. On a computer with Secure Boot, that module
+asks you to set a password and confirm it once after a restart (MOK enrollment); the package cannot skip this. If the
+install says v4l2loopback was already loaded with other settings, restart the computer.
+
+Then log out and back in: the service and the tray icon start on their own. Open "Opal C1" from the app menu for the
+control panel. To remove it: `sudo apt remove opal-rs`.
+
+Other Linux distributions: build from source, below.
+
+### Windows 11 (not yet tried on a real machine)
+Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the
+"Opal C1 Virtual" camera, starts the tray icon when you sign in, adds "Opal C1" to the Start menu and offers to start
+it right away. To remove it: Settings > Apps > Installed apps > Opal C1 (opal-rs). Your settings and camera files stay
+in `%APPDATA%\opal-rs` and `%LOCALAPPDATA%\opal-rs`.
+
+## Building from source on Linux
+
+### Requirements
+- Linux (Windows: see [Building on Windows](#building-on-windows))
 - A Rust toolchain (`cargo`)
 - Your own copy of the Opal Composer disk image listed in [README.md](README.md)
 
-## Steps
+### Steps
 1. Put the disk image at `assets/Opal_Composer_2.0.0_24.dmg` (see [assets/README.md](assets/README.md)).
 2. Build and extract the camera files:
    ```shell
@@ -14,7 +43,7 @@
    ```
    Each file is checked against its SHA-256. `opal-rs assets verify` checks them again.
 
-## Running
+### Running
 1. Give yourself access to the camera and set up the virtual camera that apps will use. This needs the
    `v4l2loopback` kernel module (on Ubuntu or Debian: `sudo apt install v4l2loopback-dkms`).
    ```shell
@@ -102,10 +131,13 @@
 Starting the service reboots the camera, which drops it off USB for a few seconds. `opal-rs` refuses to boot it again
 within a minute.
 
-## Windows (not yet tried on a real machine)
+## Building on Windows
 Windows 11 is needed: the virtual camera uses Windows 11's virtual camera support. Everything from Linux is there:
 the "Opal C1 Virtual" camera with effects, `ctl`, the control panel and the tray icon. Low power mode streams for as
-long as the service runs, as Windows does not say which apps use the camera's own video.
+long as the service runs, as Windows does not say which apps use the camera's own video, and the control panel has
+no preview then.
+
+These are the steps `opal-rs-setup.exe` does for you, by hand:
 
 1. Build the four files, from Linux with the MinGW linker (`sudo apt install gcc-mingw-w64-x86-64`) or on Windows:
    ```shell
@@ -134,6 +166,29 @@ video and audio interfaces alone.
 `opal-rs webcam` also works without the rest: the camera as an ordinary 1080p webcam until Ctrl-C.
 
 To remove the virtual camera, run `regsvr32 /u opal_vcam.dll` as administrator.
+
+## Building the packages
+Both leave out the source tree's `assets/` folder (`OPAL_RS_PACKAGED=1`), so installed copies keep the camera files
+in the user's data folder. Nothing from Opal goes into either.
+
+The Linux package, with [cargo-deb](https://crates.io/crates/cargo-deb) (`cargo install cargo-deb`), written to
+`target/debian/`:
+```shell
+OPAL_RS_PACKAGED=1 cargo build --release -p opal-rs -p opal-gui -p opal-tray
+OPAL_RS_PACKAGED=1 cargo deb -p opal-rs --no-build
+```
+Its install script loads v4l2loopback, applies the USB rule and enables the service for every user.
+
+The Windows installer, with the four programs built in (MinGW as above; `strip` keeps it smaller):
+```shell
+T=target/x86_64-pc-windows-gnu/release
+OPAL_RS_PACKAGED=1 cargo build --release --target x86_64-pc-windows-gnu -p opal-rs -p opal-gui -p opal-tray -p opal-vcam
+mkdir -p target/payload
+for f in opal-rs.exe opal-rs-gui.exe opal-rs-tray.exe opal_vcam.dll; do x86_64-w64-mingw32-strip -o target/payload/$f $T/$f; done
+OPAL_RS_PAYLOAD=$PWD/target/payload cargo build --release --target x86_64-pc-windows-gnu -p opal-setup --features payload
+```
+The installer is `$T/opal-rs-setup.exe`. Without `--features payload` it installs the four files from its own folder
+instead.
 
 ## Tests
 ```shell

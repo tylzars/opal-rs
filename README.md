@@ -41,7 +41,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
 
 ## Documentation
-- [INSTALL.md](INSTALL.md): building and extracting the camera files
+- [INSTALL.md](INSTALL.md): installing (a .deb on Ubuntu and Debian, an installer on Windows 11) or building from source
 - [docs/c1-protocol.md](docs/c1-protocol.md): notes on the camera's USB interface
 
 Opal and Opal C1 are the property of Opal Camera Inc. This project is not affiliated with or endorsed by Opal Camera
