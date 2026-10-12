@@ -10,12 +10,12 @@ pub const LOOKS: [&str; 10] = [
     "mono", "noir", "tonal", "fade", "chrome", "instant", "process", "transfer", "warm", "cool",
 ];
 
-fn luma([r, g, b]: [f32; 3]) -> f32 {
+pub(crate) fn luma([r, g, b]: [f32; 3]) -> f32 {
     0.299 * r + 0.587 * g + 0.114 * b
 }
 
 /// Moves each channel `amount` of the way from grey towards the colour (0 grey, 1 unchanged, above 1 more vivid).
-fn saturate(c: [f32; 3], amount: f32) -> [f32; 3] {
+pub(crate) fn saturate(c: [f32; 3], amount: f32) -> [f32; 3] {
     let y = luma(c);
     c.map(|v| y + (v - y) * amount)
 }

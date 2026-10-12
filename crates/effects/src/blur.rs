@@ -110,6 +110,56 @@ fn blur_plane(plane: &mut [u8], tmp: &mut [u8], w: usize, h: usize, r: usize, su
     }
 }
 
+/// Lens blur: a hexagonal kernel (three line blurs at 0, 60 and 120 degrees) in linear light, so bright spots
+/// spread into discs as they do through a real lens. `gamma` above 1 makes highlights bloom.
+fn lens_plane(plane: &mut [u8], w: usize, h: usize, r: usize, gamma: f32, threads: usize) {
+    // Near-white pixels stand for light much brighter than the sensor can show; boosting them makes them bloom.
+    let to_linear: Vec<f32> = (0..256)
+        .map(|v| {
+            let boost = if gamma > 1.0 {
+                1.0 + 12.0 * ((v as f32 - 200.0) / 55.0).max(0.0).powi(2)
+            } else {
+                1.0
+            };
+            (v as f32 / 255.0).powf(gamma) * boost
+        })
+        .collect();
+    let mut a: Vec<f32> = plane.iter().map(|&v| to_linear[v as usize]).collect();
+    let mut b = vec![0f32; a.len()];
+    let steps = (0..=2 * r).map(|k| k as f32 - r as f32);
+    let n = (2 * r + 1) as f32;
+    for degrees in [0f32, 60.0, 120.0] {
+        let (dx, dy) = (degrees.to_radians().cos(), degrees.to_radians().sin());
+        let offsets: Vec<(isize, isize)> = steps
+            .clone()
+            .map(|k| ((k * dx).round() as isize, (k * dy).round() as isize))
+            .collect();
+        let src = &a;
+        let band = h.div_ceil(threads).max(1);
+        thread::scope(|s| {
+            for (bi, out) in b.chunks_mut(band * w).enumerate() {
+                let offsets = &offsets;
+                s.spawn(move || {
+                    for (i, o) in out.iter_mut().enumerate() {
+                        let (x, y) = ((i % w) as isize, (bi * band + i / w) as isize);
+                        let mut sum = 0.0;
+                        for &(ox, oy) in offsets {
+                            let sx = (x + ox).clamp(0, w as isize - 1) as usize;
+                            let sy = (y + oy).clamp(0, h as isize - 1) as usize;
+                            sum += src[sy * w + sx];
+                        }
+                        *o = sum / n;
+                    }
+                });
+            }
+        });
+        std::mem::swap(&mut a, &mut b);
+    }
+    for (p, v) in plane.iter_mut().zip(&a) {
+        *p = (v.clamp(0.0, 1.0).powf(1.0 / gamma) * 255.0).round() as u8;
+    }
+}
+
 /// Runs `f(first_row, rows)` on row bands of `plane` in parallel.
 fn par_rows(plane: &mut [u8], row_len: usize, threads: usize, f: impl Fn(usize, &mut [u8]) + Sync) {
     let rows = plane.len() / row_len;
@@ -139,6 +189,8 @@ pub struct BackgroundBlur {
     luma_y: Vec<(u32, u32, u32)>,
     chroma_x: Vec<(u32, u32, u32)>,
     chroma_y: Vec<(u32, u32, u32)>,
+    /// Hexagonal lens blur instead of the smooth one.
+    pub lens: bool,
 }
 
 impl BackgroundBlur {
@@ -163,6 +215,7 @@ impl BackgroundBlur {
             luma_y: taps(small_h, height),
             chroma_x: taps(small_w, width / 2),
             chroma_y: taps(small_h, height / 2),
+            lens: false,
         }
     }
 
@@ -174,9 +227,16 @@ impl BackgroundBlur {
         self.downscale(luma, chroma);
 
         let r = (radius / SCALE).max(1);
-        blur_plane(&mut self.luma, &mut self.tmp, sw, sh, r, &mut self.sums);
-        blur_plane(&mut self.u, &mut self.tmp, sw, sh, r, &mut self.sums);
-        blur_plane(&mut self.v, &mut self.tmp, sw, sh, r, &mut self.sums);
+        if self.lens {
+            // The hexagon reaches out twice the line half-length.
+            lens_plane(&mut self.luma, sw, sh, r, 2.6, self.threads);
+            lens_plane(&mut self.u, sw, sh, r, 1.0, self.threads);
+            lens_plane(&mut self.v, sw, sh, r, 1.0, self.threads);
+        } else {
+            blur_plane(&mut self.luma, &mut self.tmp, sw, sh, r, &mut self.sums);
+            blur_plane(&mut self.u, &mut self.tmp, sw, sh, r, &mut self.sums);
+            blur_plane(&mut self.v, &mut self.tmp, sw, sh, r, &mut self.sums);
+        }
         self.resample_mask(mask);
 
         let (alpha, blurred) = (&self.alpha, &self.luma);
@@ -296,6 +356,23 @@ impl BackgroundBlur {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lens_spreads_a_light_into_a_hexagon() {
+        let (w, h) = (41, 41);
+        let mut p = vec![0u8; w * h];
+        p[20 * w + 20] = 255;
+        lens_plane(&mut p, w, h, 6, 2.6, 2);
+        let lit = |x: usize, y: usize| p[y * w + x] > 0;
+        // Corners of a hexagon lie along 0, 60 and 120 degrees: far to the right, but not as far straight up.
+        assert!(lit(20 + 11, 20) && lit(20 - 11, 20));
+        assert!(!lit(20, 20 - 12));
+        assert!(!lit(20 + 15, 20));
+        // Flat areas stay flat.
+        let mut flat = vec![120u8; w * h];
+        lens_plane(&mut flat, w, h, 6, 2.6, 2);
+        assert!(flat.iter().all(|&v| (v as i32 - 120).abs() <= 1));
+    }
 
     const W: usize = 64;
     const H: usize = 32;
