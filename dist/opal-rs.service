@@ -1,0 +1,9 @@
+[Unit]
+Description=Opal C1 camera
+# Every start reboots the camera, so systemd never restarts it on its own.
+
+[Service]
+ExecStart=%h/.cargo/bin/opal-rs run --output /dev/video10
+
+[Install]
+WantedBy=default.target

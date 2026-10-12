@@ -1,17 +1,15 @@
+mod daemon;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use opal_assets::{Asset, Event, Kind, RELEASES, Status};
-use opal_c1::Led;
 use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
-use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, af, awb};
 
 /// `assets/` at the repository root.
 const ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
@@ -36,11 +34,16 @@ enum Command {
     Boot,
     /// Boot and print device information
     Info,
-    /// Boot and keep the camera running
+    /// Boot and keep the camera running, controlled with `ctl`
     Run {
         /// v4l2loopback device to write video to
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+    /// Send a command to a running camera, e.g. `ctl status` or `ctl focus 120`
+    Ctl {
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
 }
 
@@ -180,114 +183,20 @@ fn main() -> Result<ExitCode> {
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             let sensor = sensor_name(&dev)?;
             println!("sensor {sensor}");
-            let streams = dev.start_pipeline(&opal_c1::pipeline(&dir, &sensor)?)?;
-            let control = streams[opal_c1::CONTROL_STREAM];
-            let mic = streams[opal_c1::MIC_STREAM];
-            let led = streams[opal_c1::LED_STREAM];
-            let video = Arc::new(Video::default());
-            {
-                let (link, video) = (dev.link().clone(), video.clone());
-                let mut out = match &output {
-                    Some(path) => Some(
-                        opal_v4l2::Output::open(path, opal_c1::VIDEO_WIDTH, opal_c1::VIDEO_HEIGHT, opal_v4l2::NV12)
-                            .with_context(|| path.display().to_string())?,
-                    ),
-                    None => None,
-                };
-                std::thread::spawn(move || {
-                    while let Ok(packet) = link.read(opal_c1::VIDEO_STREAM, None) {
-                        let Some((data, IMG_FRAME, _)) = message::split(&packet) else {
-                            continue;
-                        };
-                        if let Some(out) = &mut out
-                            && let Err(e) = out.write(data)
-                        {
-                            eprintln!("output: {e}");
-                        }
-                        video.frames.fetch_add(1, Ordering::Relaxed);
-                        *video.last.lock().unwrap() = data.to_vec();
-                    }
-                });
-            }
-            let link = dev.link();
-            let set_streaming = |on: bool| -> Result<()> {
-                if on {
-                    link.write(control, &opal_c1::start_control().to_packet())?;
-                    link.write(led, &Led::White.packet())?;
-                } else {
-                    link.write(control, &opal_c1::stop_control().to_packet())?;
-                    link.write(led, &Led::Off.packet())?;
-                }
-                Ok(())
-            };
-            set_streaming(true)?;
-            let mut streaming = true;
-            println!("running");
-            for line in std::io::stdin().lines() {
-                let line = line?;
-                let mut words = line.split_whitespace();
-                let result = match (words.next(), words.next()) {
-                    (Some("quit"), _) => break,
-                    (Some(cmd @ ("on" | "off")), None) => {
-                        let on = cmd == "on";
-                        let r = if on != streaming { set_streaming(on) } else { Ok(()) };
-                        streaming = on;
-                        r
-                    }
-                    (Some("frames"), None) => {
-                        println!("frames {}", video.frames.load(Ordering::Relaxed));
-                        Ok(())
-                    }
-                    (Some("snap"), Some(path)) => video.snap(Path::new(path)),
-                    (Some("gain"), Some(db)) => match db.parse::<f32>() {
-                        Ok(db) => link
-                            .write(mic, &AudioInConfig::gain_db(db).to_packet())
-                            .map_err(Into::into),
-                        Err(e) => Err(e.into()),
-                    },
-                    (Some("led"), Some(color)) => match color {
-                        "off" => link.write(led, &Led::Off.packet()).map_err(Into::into),
-                        "white" => link.write(led, &Led::White.packet()).map_err(Into::into),
-                        "blue" => link.write(led, &Led::Blue.packet()).map_err(Into::into),
-                        _ => Err(anyhow::anyhow!("unknown colour")),
-                    },
-                    _ => match parse_control(&line) {
-                        Some(c) => link.write(control, &c.to_packet()).map_err(Into::into),
-                        None => Err(anyhow::anyhow!("unknown command")),
-                    },
-                };
-                if let Err(e) = result {
-                    println!("error: {e}");
-                }
-            }
+            daemon::run(dev, &dir, &sensor, output)?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Ctl { command } => Ok(if daemon::send(&command)? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }),
         Command::List => {
             for d in opal_xlink::list()? {
                 println!("{:?} {:04x} {}", d.state, d.state.pid(), d.serial().unwrap_or("-"));
             }
             Ok(ExitCode::SUCCESS)
         }
-    }
-}
-
-/// Latest video frame from the camera.
-#[derive(Default)]
-struct Video {
-    frames: AtomicU64,
-    last: Mutex<Vec<u8>>,
-}
-
-impl Video {
-    /// Writes the luma plane of the latest frame as a PGM image.
-    fn snap(&self, path: &Path) -> Result<()> {
-        let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
-        let last = self.last.lock().unwrap();
-        anyhow::ensure!(last.len() >= w * h, "no frame yet");
-        let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
-        pgm.extend_from_slice(&last[..w * h]);
-        std::fs::write(path, pgm)?;
-        Ok(())
     }
 }
 
@@ -303,27 +212,4 @@ fn sensor_name(dev: &Device) -> Result<String> {
         .and_then(|s| s.as_str())
         .context("no camera sensor")?
         .to_owned())
-}
-
-/// One control command per line, e.g. `focus 120` or `exposure 10000 400`.
-fn parse_control(line: &str) -> Option<CameraControl> {
-    let mut words = line.split_whitespace();
-    let cmd = words.next()?;
-    let args: Vec<i64> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
-    let mut c = CameraControl::default();
-    match (cmd, args.as_slice()) {
-        ("focus", [p]) => c.auto_focus_mode(af::OFF).manual_focus(*p as u8),
-        ("af", []) => c.auto_focus_mode(af::CONTINUOUS_VIDEO),
-        ("exposure", [us, iso]) => c.manual_exposure(*us as u32, *iso as u32),
-        ("ae", []) => c.auto_exposure(),
-        ("ev", [v]) => c.exposure_compensation(*v as i8),
-        ("wb", [k]) => c.white_balance(*k as u16),
-        ("awb", []) => c.auto_white_balance(awb::AUTO),
-        ("brightness", [v]) => c.brightness(*v as i8),
-        ("contrast", [v]) => c.contrast(*v as i8),
-        ("saturation", [v]) => c.saturation(*v as i8),
-        ("sharpness", [v]) => c.sharpness(*v as u8),
-        _ => return None,
-    };
-    Some(c)
 }
