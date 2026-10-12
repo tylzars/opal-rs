@@ -11,8 +11,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use opal_c1::Led;
 use opal_dai::device::Device;
 use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
-use opal_effects::{BackgroundBlur, Mask};
+use opal_effects::{BackgroundBlur, Cube, Mask, YuvLut};
 use opal_xlink::{Link, StreamId};
+
+use crate::settings::Settings;
 
 /// How long the camera keeps streaming after the last app closes the output.
 const OFF_DELAY: Duration = Duration::from_secs(2);
@@ -65,6 +67,23 @@ struct Blur {
     layout: String,
 }
 
+/// Colour lookup table applied to every frame.
+struct Look {
+    name: String,
+    lut: Arc<YuvLut>,
+    amount: f32,
+}
+
+fn load_look(path: &Path, amount: f32) -> Result<Look> {
+    let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let cube = Cube::parse(&text).with_context(|| path.display().to_string())?;
+    Ok(Look {
+        name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        lut: Arc::new(YuvLut::new(&cube)),
+        amount,
+    })
+}
+
 struct Session {
     link: Arc<Link>,
     control: StreamId,
@@ -74,6 +93,8 @@ struct Session {
     output: Option<PathBuf>,
     state: Mutex<State>,
     blur: Mutex<Blur>,
+    look: Mutex<Option<Look>>,
+    settings: Mutex<Settings>,
     frames: AtomicU64,
     last_frame: Mutex<Vec<u8>>,
     alive: AtomicBool,
@@ -87,6 +108,11 @@ impl Session {
         if on {
             self.link.write(self.control, &opal_c1::start_control().to_packet())?;
             self.link.write(self.led, &Led::White.packet())?;
+            for c in self.settings.lock().unwrap().camera_commands() {
+                if let Some(c) = parse_control(c) {
+                    self.link.write(self.control, &c.to_packet())?;
+                }
+            }
         } else {
             self.link.write(self.control, &opal_c1::stop_control().to_packet())?;
             self.link.write(self.led, &Led::Off.packet())?;
@@ -112,7 +138,16 @@ impl Session {
         self.set_streaming(&mut st, want)
     }
 
+    /// Runs a command and keeps it in the settings if it changes one.
     fn command(&self, line: &str) -> Result<String> {
+        let reply = self.run_command(line)?;
+        if let Err(e) = self.settings.lock().unwrap().record(line) {
+            eprintln!("settings: {e}");
+        }
+        Ok(reply)
+    }
+
+    fn run_command(&self, line: &str) -> Result<String> {
         let words: Vec<&str> = line.split_whitespace().collect();
         match words.as_slice() {
             ["status"] => {
@@ -122,18 +157,34 @@ impl Session {
                     .mask
                     .as_ref()
                     .map_or(0.0, |m| m.data.iter().sum::<f32>() / m.data.len() as f32);
+                let look = self.look.lock().unwrap();
+                let look = look
+                    .as_ref()
+                    .map_or("none".into(), |l| format!("{} {:.2}", l.name, l.amount));
                 Ok(format!(
-                    "mode {:?} streaming {} consumers {} frames {} blur {} masks {} person {:.2} {}",
-                    st.mode,
+                    "mode {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {}",
+                    format!("{:?}", st.mode).to_lowercase(),
                     st.streaming,
                     st.consumers,
                     self.frames.load(Ordering::Relaxed),
                     blur.radius,
                     blur.masks,
                     person,
-                    blur.layout,
-                )
-                .to_lowercase())
+                    look,
+                ))
+            }
+            ["lut", "off"] => {
+                *self.look.lock().unwrap() = None;
+                Ok(String::new())
+            }
+            ["lut", path, rest @ ..] => {
+                let amount = match rest {
+                    [] => 1.0,
+                    [a] => a.parse()?,
+                    _ => bail!("usage: lut <file.cube> [amount]"),
+                };
+                *self.look.lock().unwrap() = Some(load_look(Path::new(path), amount)?);
+                Ok(String::new())
             }
             ["blur", radius] => {
                 let radius: usize = match *radius {
@@ -233,7 +284,7 @@ fn log_level(name: &str) -> Option<i32> {
 /// Black NV12 frame, written first so apps can open the output before video arrives.
 fn black_frame() -> Vec<u8> {
     let y = (opal_c1::VIDEO_WIDTH * opal_c1::VIDEO_HEIGHT) as usize;
-    let mut f = vec![16u8; y];
+    let mut f = vec![0u8; y];
     f.resize(y + y / 2, 128);
     f
 }
@@ -282,8 +333,15 @@ fn handle(session: &Session, stream: UnixStream) -> Result<()> {
 }
 
 /// Starts the pipeline on a booted camera and serves commands until told to stop.
-/// `blur` is the background blur radius in frame pixels, 0 for none.
-pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>, blur: usize) -> Result<()> {
+/// `overrides` are commands applied after the saved settings, without being saved.
+pub fn run(
+    dev: Device,
+    dir: &Path,
+    sensor: &str,
+    output: Option<PathBuf>,
+    settings: Settings,
+    overrides: &[String],
+) -> Result<()> {
     let output = output
         .map(|p| p.canonicalize().with_context(|| p.display().to_string()))
         .transpose()?;
@@ -315,10 +373,9 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>, blur:
             last_consumer: None,
             last_change: Instant::now(),
         }),
-        blur: Mutex::new(Blur {
-            radius: blur,
-            ..Default::default()
-        }),
+        blur: Mutex::new(Blur::default()),
+        look: Mutex::new(None),
+        settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
         last_frame: Mutex::new(Vec::new()),
         alive: AtomicBool::new(true),
@@ -327,9 +384,13 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>, blur:
         .link
         .write(session.control, &opal_c1::start_control().to_packet())?;
     session.link.write(session.led, &Led::White.packet())?;
-    if blur == 0 {
-        let config = NnConfig { process_inputs: false };
-        session.link.write(session.seg_ctrl, &config.to_packet())?;
+    let pause = NnConfig { process_inputs: false };
+    session.link.write(session.seg_ctrl, &pause.to_packet())?;
+    let saved: Vec<String> = session.settings.lock().unwrap().commands().map(str::to_owned).collect();
+    for c in saved.iter().chain(overrides) {
+        if let Err(e) = session.run_command(c) {
+            eprintln!("{c}: {e}");
+        }
     }
 
     {
@@ -344,6 +405,10 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>, blur:
                 };
                 frame.clear();
                 frame.extend_from_slice(data);
+                let look = session.look.lock().unwrap().as_ref().map(|l| (l.lut.clone(), l.amount));
+                if let (Some((lut, amount)), true) = (look, frame.len() >= w * h * 3 / 2) {
+                    lut.apply(&mut frame, w, h, amount);
+                }
                 let (radius, mask) = {
                     let blur = session.blur.lock().unwrap();
                     (blur.radius, blur.mask.clone())
@@ -446,6 +511,14 @@ pub fn send(words: &[String]) -> Result<bool> {
     let socket = socket_path();
     let mut stream =
         UnixStream::connect(&socket).with_context(|| format!("no running session at {}", socket.display()))?;
+    let mut words = words.to_vec();
+    // Paths are resolved by the daemon, which runs in another directory.
+    if let [cmd, path, ..] = words.as_mut_slice()
+        && matches!(cmd.as_str(), "lut" | "snap")
+        && path != "off"
+    {
+        *path = std::path::absolute(&*path)?.display().to_string();
+    }
     writeln!(stream, "{}", words.join(" "))?;
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply)?;

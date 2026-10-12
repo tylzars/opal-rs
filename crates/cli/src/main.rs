@@ -1,4 +1,5 @@
 mod daemon;
+mod settings;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -39,9 +40,15 @@ enum Command {
         /// v4l2loopback device to write video to
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Background blur radius in pixels, 0 for none
-        #[arg(long, default_value_t = 0)]
-        blur: usize,
+        /// Background blur radius in pixels, 0 for none [default: saved setting]
+        #[arg(long)]
+        blur: Option<usize>,
+        /// Colour lookup table (.cube) to apply [default: saved setting]
+        #[arg(long)]
+        lut: Option<PathBuf>,
+        /// Settings file [default: ~/.config/opal-rs/settings]
+        #[arg(long)]
+        settings: Option<PathBuf>,
     },
     /// Send a command to a running camera, e.g. `ctl status` or `ctl focus 120`
     Ctl {
@@ -181,12 +188,25 @@ fn main() -> Result<ExitCode> {
             dev.close();
             Ok(ExitCode::SUCCESS)
         }
-        Command::Run { output, blur } => {
+        Command::Run {
+            output,
+            blur,
+            lut,
+            settings,
+        } => {
+            let settings = settings::Settings::load(&settings.unwrap_or_else(settings::default_path));
+            let mut overrides = Vec::new();
+            if let Some(r) = blur {
+                overrides.push(format!("blur {r}"));
+            }
+            if let Some(p) = lut {
+                overrides.push(format!("lut {}", p.display()));
+            }
             let booted = boot(&dir)?;
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             let sensor = sensor_name(&dev)?;
             println!("sensor {sensor}");
-            daemon::run(dev, &dir, &sensor, output, blur)?;
+            daemon::run(dev, &dir, &sensor, output, settings, &overrides)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Ctl { command } => Ok(if daemon::send(&command)? {

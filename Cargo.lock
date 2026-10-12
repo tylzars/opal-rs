@@ -475,6 +475,9 @@ dependencies = [
 [[package]]
 name = "opal-effects"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "opal-rs"
