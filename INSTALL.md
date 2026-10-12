@@ -51,10 +51,15 @@
    opal-rs ctl tracking slow  # how fast framing follows: slow, normal or fast
    opal-rs ctl gestures on    # hand gestures: a peace sign turns the video off and on, a pinch turns framing on and off
    opal-rs ctl resolution 1440p   # 720p, 1080p (default) or 1440p; restarts the camera
+   opal-rs ctl power low      # low power mode, see below; power normal goes back; restarts the camera
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.
-   Focus, exposure, white balance, image adjustments, microphone gain, blur, background, colour look, framing and
-   gestures are saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
+   Focus, exposure, white balance, image adjustments, microphone gain, blur, background, colour look, framing,
+   gestures, resolution and low power mode are saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
+
+   In low power mode the camera sends 1080p video straight to your apps like an ordinary webcam, so your computer
+   does less work, but there are no effects (blur, background, looks, framing, gestures). Pick "Opal C1" in your
+   apps instead of "Opal C1 Virtual" while it is on.
 
 4. Or use the control panel, which also shows a preview:
    ```shell

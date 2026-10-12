@@ -117,9 +117,19 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     let booted = boot(dir)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = sensor_name(&dev)?;
-    let resolution = settings.resolution();
-    println!("sensor {sensor} {}", resolution.name());
-    daemon::run(dev, dir, &sensor, resolution, output, settings, overrides)
+    let low_power = settings.low_power();
+    // Low power mode streams 1080p, as the camera's own USB video has no other size.
+    let resolution = if low_power {
+        opal_c1::Resolution::P1080
+    } else {
+        settings.resolution()
+    };
+    println!(
+        "sensor {sensor} {}{}",
+        resolution.name(),
+        if low_power { " low power" } else { "" }
+    );
+    daemon::run(dev, dir, &sensor, resolution, low_power, output, settings, overrides)
 }
 
 fn check_boot_interval() -> Result<()> {

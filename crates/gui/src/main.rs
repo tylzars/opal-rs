@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,7 @@ struct Controls {
     zoom_amount: f32,
     tracking: String,
     gestures: bool,
+    low_power: bool,
     resolution: String,
 }
 
@@ -104,6 +105,7 @@ impl Default for Controls {
             zoom_amount: 0.5,
             tracking: "normal".into(),
             gestures: false,
+            low_power: false,
             resolution: "1080p".into(),
         }
     }
@@ -147,6 +149,7 @@ impl Controls {
                 ["zoom", a] => (c.zoom, c.zoom_amount) = (true, a.parse().unwrap_or(0.5)),
                 ["tracking", s] => c.tracking = (*s).to_owned(),
                 ["gestures", g] => c.gestures = *g == "on",
+                ["power", p] => c.low_power = *p == "low",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
                 _ => {}
             }
@@ -180,17 +183,33 @@ fn nv12_to_rgb_small(frame: &[u8], width: usize, height: usize, step: usize) -> 
     out
 }
 
+/// The camera's own video device, used in low power mode.
+fn camera_node() -> PathBuf {
+    std::fs::read_dir("/sys/class/video4linux")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|e| {
+            let read = |f: &str| std::fs::read_to_string(e.path().join(f)).map(|s| s.trim().to_owned());
+            read("index").is_ok_and(|i| i == "0") && read("device/../idVendor").is_ok_and(|v| v == "03e7")
+        })
+        .map_or_else(
+            || PathBuf::from("/dev/video0"),
+            |e| PathBuf::from("/dev").join(e.file_name()),
+        )
+}
+
 fn start_preview(
     shared: Arc<Mutex<Preview>>,
     running: Arc<Mutex<bool>>,
     ctx: egui::Context,
-    (width, height): (usize, usize),
+    (device, (width, height)): (PathBuf, (usize, usize)),
 ) {
     let step = (width / PREVIEW_WIDTH).max(1);
     shared.lock().unwrap().size = [width / step, height / step];
     std::thread::spawn(move || {
         let result = (|| -> std::io::Result<()> {
-            let mut cap = opal_v4l2::Capture::open(Path::new(VIDEO), width as u32, height as u32, opal_v4l2::NV12)?;
+            let mut cap = opal_v4l2::Capture::open(&device, width as u32, height as u32, opal_v4l2::NV12)?;
             let mut last = Instant::now() - Duration::from_secs(1);
             while *running.lock().unwrap() {
                 let rgb = cap.next(Duration::from_secs(5), |f| {
@@ -206,7 +225,7 @@ fn start_preview(
             Ok(())
         })();
         if let Err(e) = result {
-            shared.lock().unwrap().error = Some(format!("{VIDEO}: {e}"));
+            shared.lock().unwrap().error = Some(format!("{}: {e}", device.display()));
             ctx.request_repaint();
         }
         *running.lock().unwrap() = false;
@@ -255,18 +274,24 @@ impl App {
         let c = &mut self.c;
 
         ui.heading("Camera");
-        ui.horizontal(|ui| {
-            ui.label("Resolution");
-            egui::ComboBox::from_id_salt("resolution")
-                .selected_text(&c.resolution)
-                .show_ui(ui, |ui| {
-                    for (name, _, _) in RESOLUTIONS {
-                        if ui.selectable_value(&mut c.resolution, name.to_owned(), name).changed() {
-                            cmds.push(format!("resolution {name}"));
+        if ui.checkbox(&mut c.low_power, "Low power mode").changed() {
+            cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
+        }
+        ui.weak("Apps use the camera directly at 1080p, without effects. Restarts the camera.");
+        ui.add_enabled_ui(!c.low_power, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Resolution");
+                egui::ComboBox::from_id_salt("resolution")
+                    .selected_text(&c.resolution)
+                    .show_ui(ui, |ui| {
+                        for (name, _, _) in RESOLUTIONS {
+                            if ui.selectable_value(&mut c.resolution, name.to_owned(), name).changed() {
+                                cmds.push(format!("resolution {name}"));
+                            }
                         }
-                    }
-                });
-            ui.weak("restarts the camera");
+                    });
+                ui.weak("restarts the camera");
+            })
         });
         ui.horizontal(|ui| {
             ui.label("Streaming");
@@ -359,100 +384,105 @@ impl App {
 
         ui.separator();
         ui.heading("Effects");
-        if ui.checkbox(&mut c.blur, "Blur background").changed() {
-            cmds.push(format!("blur {}", if c.blur { c.blur_radius } else { 0 }));
+        if c.low_power {
+            ui.weak("Not available in low power mode.");
         }
-        if ui
-            .add_enabled(c.blur, egui::Slider::new(&mut c.blur_radius, 4..=64).text("Blur"))
-            .changed()
-        {
-            cmds.push(format!("blur {}", c.blur_radius));
-        }
+        ui.add_enabled_ui(!c.low_power, |ui| {
+            if ui.checkbox(&mut c.blur, "Blur background").changed() {
+                cmds.push(format!("blur {}", if c.blur { c.blur_radius } else { 0 }));
+            }
+            if ui
+                .add_enabled(c.blur, egui::Slider::new(&mut c.blur_radius, 4..=64).text("Blur"))
+                .changed()
+            {
+                cmds.push(format!("blur {}", c.blur_radius));
+            }
 
-        ui.horizontal(|ui| {
-            ui.label("Background picture");
-            ui.text_edit_singleline(&mut c.background);
-        });
-        if ui.checkbox(&mut c.background_on, "Replace background").changed() {
-            cmds.push(if c.background_on {
-                format!("background {}", c.background)
-            } else {
-                "background off".into()
+            ui.horizontal(|ui| {
+                ui.label("Background picture");
+                ui.text_edit_singleline(&mut c.background);
             });
-        }
+            if ui.checkbox(&mut c.background_on, "Replace background").changed() {
+                cmds.push(if c.background_on {
+                    format!("background {}", c.background)
+                } else {
+                    "background off".into()
+                });
+            }
 
-        ui.horizontal(|ui| {
-            ui.label("Look");
-            let builtin = opal_effects::LOOKS.contains(&c.look.as_str());
-            egui::ComboBox::from_id_salt("look")
-                .selected_text(if builtin { c.look.as_str() } else { "from file" })
-                .show_ui(ui, |ui| {
-                    for name in opal_effects::LOOKS {
-                        if ui.selectable_label(c.look == name, name).clicked() {
-                            c.look = name.to_owned();
-                            if c.look_on {
-                                cmds.push(format!("lut {} {:.2}", c.look, c.look_amount));
+            ui.horizontal(|ui| {
+                ui.label("Look");
+                let builtin = opal_effects::LOOKS.contains(&c.look.as_str());
+                egui::ComboBox::from_id_salt("look")
+                    .selected_text(if builtin { c.look.as_str() } else { "from file" })
+                    .show_ui(ui, |ui| {
+                        for name in opal_effects::LOOKS {
+                            if ui.selectable_label(c.look == name, name).clicked() {
+                                c.look = name.to_owned();
+                                if c.look_on {
+                                    cmds.push(format!("lut {} {:.2}", c.look, c.look_amount));
+                                }
                             }
                         }
-                    }
-                    if ui.selectable_label(!builtin, "from file").clicked() && builtin {
-                        c.look.clear();
-                    }
-                });
-        });
-        if !opal_effects::LOOKS.contains(&c.look.as_str()) {
-            ui.horizontal(|ui| {
-                ui.label(".cube file");
-                ui.text_edit_singleline(&mut c.look);
+                        if ui.selectable_label(!builtin, "from file").clicked() && builtin {
+                            c.look.clear();
+                        }
+                    });
             });
-        }
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut c.look_on, "Use look").changed() {
-                cmds.push(if c.look_on {
-                    format!("lut {} {:.2}", c.look, c.look_amount)
-                } else {
-                    "lut off".into()
+            if !opal_effects::LOOKS.contains(&c.look.as_str()) {
+                ui.horizontal(|ui| {
+                    ui.label(".cube file");
+                    ui.text_edit_singleline(&mut c.look);
                 });
             }
-            let s = ui.add_enabled(
-                c.look_on,
-                egui::Slider::new(&mut c.look_amount, 0.0..=1.0).text("Amount"),
-            );
-            if s.drag_stopped() || (s.changed() && !s.dragged()) {
-                cmds.push(format!("lut {} {:.2}", c.look, c.look_amount));
-            }
-        });
-
-        if ui.checkbox(&mut c.zoom, "Follow my face").changed() {
-            cmds.push(if c.zoom {
-                format!("zoom {:.2}", c.zoom_amount)
-            } else {
-                "zoom off".into()
-            });
-        }
-        if ui
-            .add_enabled(c.zoom, egui::Slider::new(&mut c.zoom_amount, 0.0..=1.0).text("Framing"))
-            .changed()
-        {
-            cmds.push(format!("zoom {:.2}", c.zoom_amount));
-        }
-        ui.add_enabled_ui(c.zoom, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Tracking");
-                for speed in ["slow", "normal", "fast"] {
-                    if ui.radio_value(&mut c.tracking, speed.to_owned(), speed).changed() {
-                        cmds.push(format!("tracking {speed}"));
-                    }
+                if ui.checkbox(&mut c.look_on, "Use look").changed() {
+                    cmds.push(if c.look_on {
+                        format!("lut {} {:.2}", c.look, c.look_amount)
+                    } else {
+                        "lut off".into()
+                    });
+                }
+                let s = ui.add_enabled(
+                    c.look_on,
+                    egui::Slider::new(&mut c.look_amount, 0.0..=1.0).text("Amount"),
+                );
+                if s.drag_stopped() || (s.changed() && !s.dragged()) {
+                    cmds.push(format!("lut {} {:.2}", c.look, c.look_amount));
                 }
             });
-        });
 
-        if ui.checkbox(&mut c.gestures, "Hand gestures").changed() {
-            cmds.push(format!("gestures {}", if c.gestures { "on" } else { "off" }));
-        }
-        ui.add_enabled_ui(c.gestures, |ui| {
-            ui.label("Peace sign: video off and on");
-            ui.label("Pinch: follow my face on and off");
+            if ui.checkbox(&mut c.zoom, "Follow my face").changed() {
+                cmds.push(if c.zoom {
+                    format!("zoom {:.2}", c.zoom_amount)
+                } else {
+                    "zoom off".into()
+                });
+            }
+            if ui
+                .add_enabled(c.zoom, egui::Slider::new(&mut c.zoom_amount, 0.0..=1.0).text("Framing"))
+                .changed()
+            {
+                cmds.push(format!("zoom {:.2}", c.zoom_amount));
+            }
+            ui.add_enabled_ui(c.zoom, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Tracking");
+                    for speed in ["slow", "normal", "fast"] {
+                        if ui.radio_value(&mut c.tracking, speed.to_owned(), speed).changed() {
+                            cmds.push(format!("tracking {speed}"));
+                        }
+                    }
+                });
+            });
+
+            if ui.checkbox(&mut c.gestures, "Hand gestures").changed() {
+                cmds.push(format!("gestures {}", if c.gestures { "on" } else { "off" }));
+            }
+            ui.add_enabled_ui(c.gestures, |ui| {
+                ui.label("Peace sign: video off and on");
+                ui.label("Pinch: follow my face on and off");
+            });
         });
 
         for cmd in cmds {
@@ -470,7 +500,11 @@ impl App {
                     self.preview.clone(),
                     self.preview_running.clone(),
                     ui.ctx().clone(),
-                    video_size(&self.c.resolution),
+                    if self.c.low_power {
+                        (camera_node(), video_size("1080p"))
+                    } else {
+                        (PathBuf::from(VIDEO), video_size(&self.c.resolution))
+                    },
                 );
             }
         }

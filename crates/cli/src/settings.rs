@@ -43,6 +43,7 @@ fn group(command: &str) -> Option<&'static str> {
         "tracking" => "tracking",
         "resolution" => "resolution",
         "gestures" => "gestures",
+        "power" => "power",
         _ => return None,
     })
 }
@@ -99,6 +100,11 @@ impl Settings {
             .and_then(|c| c.split_whitespace().nth(1))
             .and_then(opal_c1::Resolution::parse)
             .unwrap_or_default()
+    }
+
+    /// True when low power mode is saved.
+    pub fn low_power(&self) -> bool {
+        self.commands.get("power").is_some_and(|c| c == "power low")
     }
 
     pub fn commands(&self) -> impl Iterator<Item = &str> {

@@ -27,6 +27,8 @@ const OFF_DELAY: Duration = Duration::from_secs(2);
 const STOP_AFTER: Duration = Duration::from_secs(2);
 /// Time a stop needs before the camera can be rebooted.
 const STOP_SETTLE: Duration = Duration::from_secs(3);
+/// In low power mode, time after a start by which the camera is taken to be sending video.
+const LOW_POWER_START: Duration = Duration::from_secs(3);
 /// Shortest time from a stop to the next start.
 const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
@@ -177,9 +179,13 @@ struct Session {
     control: StreamId,
     mic: StreamId,
     led: StreamId,
-    /// Network and crop control streams of each branch, in `Branch::ALL` order.
+    /// Network and crop control streams of each branch, in `Branch::ALL` order; empty in low power mode.
     branches: Vec<(StreamId, StreamId)>,
-    crop_in: StreamId,
+    crop_in: Option<StreamId>,
+    /// The camera streams straight to apps over USB video, without effects.
+    low_power: bool,
+    /// The camera's own video device, watched for apps in low power mode.
+    camera_node: Mutex<Option<PathBuf>>,
     resolution: Resolution,
     output: Option<PathBuf>,
     state: Mutex<State>,
@@ -201,7 +207,9 @@ impl Session {
     /// Pauses or resumes a branch: its crop and its network.
     fn set_branch(&self, branch: Branch, on: bool) -> Result<()> {
         let i = Branch::ALL.iter().position(|&b| b == branch).unwrap();
-        let (network, crop) = self.branches[i];
+        let Some(&(network, crop)) = self.branches.get(i) else {
+            return Ok(());
+        };
         if on {
             self.link.write(crop, &branch.crop(true).to_packet())?;
             self.link
@@ -245,7 +253,13 @@ impl Session {
 
     fn update(&self, consumers: Option<usize>) -> Result<()> {
         let mut st = self.state.lock().unwrap();
-        if st.streaming && st.first_frame.is_none() && self.frames.load(Ordering::Relaxed) > st.start_frames {
+        // Low power video does not pass through the host, so frames are assumed once the camera has had time to start.
+        let started = if self.low_power {
+            st.last_change.elapsed() >= LOW_POWER_START
+        } else {
+            self.frames.load(Ordering::Relaxed) > st.start_frames
+        };
+        if st.streaming && st.first_frame.is_none() && started {
             st.first_frame = Some(Instant::now());
         }
         if let Some(n) = consumers {
@@ -257,7 +271,9 @@ impl Session {
         let want = match st.mode {
             Mode::On => true,
             Mode::Off => false,
-            Mode::Auto => self.output.is_none() || st.last_consumer.is_some_and(|t| t.elapsed() < OFF_DELAY),
+            Mode::Auto => {
+                (self.output.is_none() && !self.low_power) || st.last_consumer.is_some_and(|t| t.elapsed() < OFF_DELAY)
+            }
         };
         self.set_streaming(&mut st, want)
     }
@@ -273,6 +289,9 @@ impl Session {
 
     fn run_command(&self, line: &str) -> Result<String> {
         let words: Vec<&str> = line.split_whitespace().collect();
+        if self.low_power && words.first().is_some_and(|w| is_effect(w)) {
+            bail!("not available in low power mode");
+        }
         match words.as_slice() {
             ["status"] => {
                 let st = self.state.lock().unwrap();
@@ -292,8 +311,9 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} video {}",
+                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} video {}",
                     format!("{:?}", st.mode).to_lowercase(),
+                    if self.low_power { "low" } else { "normal" },
                     self.resolution.name(),
                     self.temperature
                         .lock()
@@ -365,6 +385,12 @@ impl Session {
                     "fast" => Speed::Fast,
                     _ => bail!("tracking slow, normal or fast"),
                 };
+                Ok(String::new())
+            }
+            ["power", power @ ("low" | "normal")] => {
+                if (*power == "low") != self.low_power {
+                    RESTART.store(true, Ordering::Relaxed);
+                }
                 Ok(String::new())
             }
             ["resolution", name] => {
@@ -513,6 +539,30 @@ fn black_frame((w, h): (u32, u32)) -> Vec<u8> {
     f
 }
 
+/// Commands for effects, which low power mode does not have.
+fn is_effect(command: &str) -> bool {
+    matches!(
+        command,
+        "blur" | "background" | "lut" | "zoom" | "tracking" | "gestures" | "video" | "snap"
+    )
+}
+
+/// The camera's own video device, when it is plugged in and booted.
+fn find_camera_node() -> Option<PathBuf> {
+    std::fs::read_dir("/sys/class/video4linux")
+        .ok()?
+        .flatten()
+        .find_map(|e| {
+            let dir = e.path();
+            let read = |f: &str| std::fs::read_to_string(dir.join(f)).map(|s| s.trim().to_owned());
+            // `device` is the USB interface; its parent is the USB device.
+            let ours = read("index").is_ok_and(|i| i == "0")
+                && read("device/../idVendor").is_ok_and(|v| v == "03e7")
+                && read("device/../idProduct").is_ok_and(|p| p == "f63b");
+            ours.then(|| PathBuf::from("/dev").join(e.file_name()))
+        })
+}
+
 /// Number of other processes that have `path` open.
 fn count_consumers(path: &Path) -> usize {
     let me = std::process::id().to_string();
@@ -558,17 +608,21 @@ fn handle(session: &Session, stream: UnixStream) -> Result<()> {
 
 /// Starts the pipeline on a booted camera and serves commands until told to stop.
 /// `overrides` are commands applied after the saved settings, without being saved.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dev: Device,
     dir: &Path,
     sensor: &str,
     resolution: Resolution,
+    low_power: bool,
     output: Option<PathBuf>,
     settings: Settings,
     overrides: &[String],
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
+    // In low power mode apps use the camera itself, not the virtual camera.
     let output = output
+        .filter(|_| !low_power)
         .map(|p| p.canonicalize().with_context(|| p.display().to_string()))
         .transpose()?;
     let mut out = match &output {
@@ -584,7 +638,7 @@ pub fn run(
     if let Some(level) = std::env::var("OPAL_RS_LOG").ok().and_then(|l| log_level(&l)) {
         dev.call("setLogLevel", vec![level.into()])?;
     }
-    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution)?)?;
+    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution, low_power)?)?;
     let session = Arc::new(Session {
         link: dev.link().clone(),
         control: streams[opal_c1::CONTROL_STREAM],
@@ -592,9 +646,11 @@ pub fn run(
         led: streams[opal_c1::LED_STREAM],
         branches: Branch::ALL
             .iter()
-            .map(|b| (streams[b.network_control()], streams[b.crop_control()]))
+            .map_while(|b| Some((*streams.get(b.network_control())?, *streams.get(b.crop_control())?)))
             .collect(),
-        crop_in: streams[hands::CROP_STREAM],
+        crop_in: streams.get(hands::CROP_STREAM).copied(),
+        low_power,
+        camera_node: Mutex::new(None),
         resolution,
         output: output.clone(),
         state: Mutex::new(State {
@@ -634,6 +690,9 @@ pub fn run(
     }
     let saved: Vec<String> = session.settings.lock().unwrap().commands().map(str::to_owned).collect();
     for c in saved.iter().chain(overrides) {
+        if low_power && c.split_whitespace().next().is_some_and(is_effect) {
+            continue;
+        }
         if let Err(e) = session.run_command(c) {
             eprintln!("{c}: {e}");
         }
@@ -754,6 +813,9 @@ pub fn run(
         // Palm detections start following a hand when none is followed.
         let session = session.clone();
         std::thread::spawn(move || {
+            let Some(crop_in) = session.crop_in else {
+                return;
+            };
             while let Ok(packet) = session.link.read(hands::PALM_STREAM, None) {
                 let Some((nn, data)) = NnData::parse(&packet) else {
                     continue;
@@ -767,7 +829,7 @@ pub fn run(
                 h.pending = None;
                 h.seen = false;
                 if let Some(b) = view.palm(&scores, &regressors) {
-                    if session.link.write(session.crop_in, &view.crop(&b).to_packet()).is_err() {
+                    if session.link.write(crop_in, &view.crop(&b).to_packet()).is_err() {
                         break;
                     }
                     h.pending = Some((b, Instant::now()));
@@ -780,6 +842,9 @@ pub fn run(
         let session = session.clone();
         let aspect = vw as f32 / vh as f32;
         std::thread::spawn(move || {
+            let Some(crop_in) = session.crop_in else {
+                return;
+            };
             while let Ok(packet) = session.link.read(hands::LANDMARK_STREAM, None) {
                 let Some((nn, data)) = NnData::parse(&packet) else {
                     continue;
@@ -799,11 +864,7 @@ pub fn run(
                     h.seen = hand.is_some();
                     if let (Some(hand), true) = (&hand, h.enabled) {
                         let next = hands::follow(hand);
-                        if session
-                            .link
-                            .write(session.crop_in, &view.crop(&next).to_packet())
-                            .is_ok()
-                        {
+                        if session.link.write(crop_in, &view.crop(&next).to_packet()).is_ok() {
                             h.pending = Some((next, Instant::now()));
                         }
                     }
@@ -867,7 +928,15 @@ pub fn run(
             });
             *session.temperature.lock().unwrap() = t;
         }
-        let consumers = output.as_deref().map(count_consumers);
+        let consumers = if low_power {
+            let mut node = session.camera_node.lock().unwrap();
+            if node.as_ref().is_none_or(|n| !n.exists()) {
+                *node = find_camera_node();
+            }
+            Some(node.as_deref().map_or(0, count_consumers))
+        } else {
+            output.as_deref().map(count_consumers)
+        };
         if let Err(e) = session.update(consumers) {
             result = Err(e);
             break;
