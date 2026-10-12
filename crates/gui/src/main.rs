@@ -9,10 +9,16 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 const VIDEO: &str = "/dev/video10";
-const WIDTH: usize = 1920;
-const HEIGHT: usize = 1080;
-/// Preview is shown at a quarter of the video size.
-const STEP: usize = 4;
+/// Preview width in pixels; frames are sampled down to about this.
+const PREVIEW_WIDTH: usize = 480;
+const RESOLUTIONS: [(&str, usize, usize); 3] = [("720p", 1280, 720), ("1080p", 1920, 1080), ("1440p", 2560, 1440)];
+
+fn video_size(name: &str) -> (usize, usize) {
+    RESOLUTIONS
+        .iter()
+        .find(|r| r.0 == name)
+        .map_or((1920, 1080), |r| (r.1, r.2))
+}
 
 fn socket_path() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
@@ -65,6 +71,7 @@ struct Controls {
     zoom: bool,
     zoom_amount: f32,
     tracking: String,
+    resolution: String,
 }
 
 impl Default for Controls {
@@ -91,6 +98,7 @@ impl Default for Controls {
             zoom: false,
             zoom_amount: 0.5,
             tracking: "normal".into(),
+            resolution: "1080p".into(),
         }
     }
 }
@@ -130,6 +138,7 @@ impl Controls {
                 ["zoom", "on"] => c.zoom = true,
                 ["zoom", a] => (c.zoom, c.zoom_amount) = (true, a.parse().unwrap_or(0.5)),
                 ["tracking", s] => c.tracking = (*s).to_owned(),
+                ["resolution", r] => c.resolution = (*r).to_owned(),
                 _ => {}
             }
         }
@@ -141,17 +150,19 @@ impl Controls {
 #[derive(Default)]
 struct Preview {
     rgb: Option<Vec<u8>>,
+    size: [usize; 2],
     error: Option<String>,
 }
 
-fn nv12_to_rgb_small(frame: &[u8]) -> Vec<u8> {
-    let (w, h) = (WIDTH / STEP, HEIGHT / STEP);
+/// Every `step`-th pixel of a `width` x `height` NV12 frame as RGB.
+fn nv12_to_rgb_small(frame: &[u8], width: usize, height: usize, step: usize) -> Vec<u8> {
+    let (w, h) = (width / step, height / step);
     let mut out = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         for x in 0..w {
-            let (sx, sy) = (x * STEP, y * STEP);
-            let luma = frame[sy * WIDTH + sx] as f32;
-            let c = WIDTH * HEIGHT + (sy / 2) * WIDTH + (sx / 2) * 2;
+            let (sx, sy) = (x * step, y * step);
+            let luma = frame[sy * width + sx] as f32;
+            let c = width * height + (sy / 2) * width + (sx / 2) * 2;
             let (u, v) = (frame[c] as f32 - 128.0, frame[c + 1] as f32 - 128.0);
             let px = [luma + 1.402 * v, luma - 0.344_136 * u - 0.714_136 * v, luma + 1.772 * u];
             out.extend(px.map(|p| p.clamp(0.0, 255.0) as u8));
@@ -160,15 +171,22 @@ fn nv12_to_rgb_small(frame: &[u8]) -> Vec<u8> {
     out
 }
 
-fn start_preview(shared: Arc<Mutex<Preview>>, running: Arc<Mutex<bool>>, ctx: egui::Context) {
+fn start_preview(
+    shared: Arc<Mutex<Preview>>,
+    running: Arc<Mutex<bool>>,
+    ctx: egui::Context,
+    (width, height): (usize, usize),
+) {
+    let step = (width / PREVIEW_WIDTH).max(1);
+    shared.lock().unwrap().size = [width / step, height / step];
     std::thread::spawn(move || {
         let result = (|| -> std::io::Result<()> {
-            let mut cap = opal_v4l2::Capture::open(Path::new(VIDEO), WIDTH as u32, HEIGHT as u32, opal_v4l2::NV12)?;
+            let mut cap = opal_v4l2::Capture::open(Path::new(VIDEO), width as u32, height as u32, opal_v4l2::NV12)?;
             let mut last = Instant::now() - Duration::from_secs(1);
             while *running.lock().unwrap() {
                 let rgb = cap.next(Duration::from_secs(5), |f| {
-                    (last.elapsed() > Duration::from_millis(66) && f.data.len() >= WIDTH * HEIGHT * 3 / 2)
-                        .then(|| nv12_to_rgb_small(f.data))
+                    (last.elapsed() > Duration::from_millis(66) && f.data.len() >= width * height * 3 / 2)
+                        .then(|| nv12_to_rgb_small(f.data, width, height, step))
                 })?;
                 if let Some(rgb) = rgb {
                     last = Instant::now();
@@ -228,6 +246,19 @@ impl App {
         let c = &mut self.c;
 
         ui.heading("Camera");
+        ui.horizontal(|ui| {
+            ui.label("Resolution");
+            egui::ComboBox::from_id_salt("resolution")
+                .selected_text(&c.resolution)
+                .show_ui(ui, |ui| {
+                    for (name, _, _) in RESOLUTIONS {
+                        if ui.selectable_value(&mut c.resolution, name.to_owned(), name).changed() {
+                            cmds.push(format!("resolution {name}"));
+                        }
+                    }
+                });
+            ui.weak("restarts the camera");
+        });
         ui.horizontal(|ui| {
             ui.label("Streaming");
             for (m, name) in [(Mode::Auto, "Auto"), (Mode::On, "On"), (Mode::Off, "Off")] {
@@ -385,7 +416,12 @@ impl App {
             *self.preview_running.lock().unwrap() = running;
             if running {
                 self.preview.lock().unwrap().error = None;
-                start_preview(self.preview.clone(), self.preview_running.clone(), ui.ctx().clone());
+                start_preview(
+                    self.preview.clone(),
+                    self.preview_running.clone(),
+                    ui.ctx().clone(),
+                    video_size(&self.c.resolution),
+                );
             }
         }
         let mut p = self.preview.lock().unwrap();
@@ -393,7 +429,7 @@ impl App {
             self.message = e;
         }
         if let Some(rgb) = p.rgb.take() {
-            let image = egui::ColorImage::from_rgb([WIDTH / STEP, HEIGHT / STEP], &rgb);
+            let image = egui::ColorImage::from_rgb(p.size, &rgb);
             match &mut self.texture {
                 Some(t) => t.set(image, egui::TextureOptions::LINEAR),
                 None => self.texture = Some(ui.ctx().load_texture("preview", image, egui::TextureOptions::LINEAR)),

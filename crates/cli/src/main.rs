@@ -117,8 +117,9 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     let booted = boot(dir)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = sensor_name(&dev)?;
-    println!("sensor {sensor}");
-    daemon::run(dev, dir, &sensor, output, settings, overrides)
+    let resolution = settings.resolution();
+    println!("sensor {sensor} {}", resolution.name());
+    daemon::run(dev, dir, &sensor, resolution, output, settings, overrides)
 }
 
 fn check_boot_interval() -> Result<()> {
@@ -232,6 +233,10 @@ fn main() -> Result<ExitCode> {
                     None => settings::Settings::load(&settings_path),
                 };
                 let result = run_session(&dir, output.clone(), settings, &overrides);
+                if daemon::take_restart() && result.is_ok() {
+                    std::thread::sleep(boot_wait());
+                    continue;
+                }
                 if daemon::stopped() {
                     result?;
                     break;

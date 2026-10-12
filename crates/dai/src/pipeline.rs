@@ -74,6 +74,8 @@ pub struct Pipeline {
     tuning: Option<Vec<u8>>,
     xlink_in: Vec<String>,
     xlink_out: Vec<String>,
+    /// None leaves the device default.
+    xlink_chunk_size: Option<i32>,
 }
 
 // Node properties, in wire order.
@@ -675,6 +677,11 @@ impl Pipeline {
         self.tuning = Some(blob);
     }
 
+    /// Size the device splits XLink writes into; 0 sends each message in one piece.
+    pub fn set_xlink_chunk_size(&mut self, bytes: i32) {
+        self.xlink_chunk_size = Some(bytes);
+    }
+
     pub fn link(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) {
         self.links.push(Link {
             from,
@@ -704,7 +711,7 @@ impl Pipeline {
             "leonMssFrequencyHz" => 700e6f64,
             "pipelineName" => Value::Nil,
             "pipelineVersion" => Value::Nil,
-            "xlinkChunkSize" => -1i32,
+            "xlinkChunkSize" => self.xlink_chunk_size.unwrap_or(-1),
         };
         let nodes = self
             .nodes

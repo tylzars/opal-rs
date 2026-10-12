@@ -40,6 +40,7 @@ fn group(command: &str) -> Option<&'static str> {
         "lut" => "lut",
         "zoom" => "zoom",
         "tracking" => "tracking",
+        "resolution" => "resolution",
         _ => return None,
     })
 }
@@ -87,6 +88,15 @@ impl Settings {
             text.push('\n');
         }
         std::fs::write(&self.path, text)
+    }
+
+    /// The saved video resolution.
+    pub fn resolution(&self) -> opal_c1::Resolution {
+        self.commands
+            .get("resolution")
+            .and_then(|c| c.split_whitespace().nth(1))
+            .and_then(opal_c1::Resolution::parse)
+            .unwrap_or_default()
     }
 
     pub fn commands(&self) -> impl Iterator<Item = &str> {

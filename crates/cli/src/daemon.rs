@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use opal_c1::Led;
+use opal_c1::Resolution;
 use opal_c1::faces::{self, Tracker};
 use opal_dai::device::Device;
 use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
@@ -23,12 +24,19 @@ const OFF_DELAY: Duration = Duration::from_secs(2);
 /// and stopping it before then hangs the firmware.
 const MIN_HOLD: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(250);
+const TEMPERATURE_PERIOD: Duration = Duration::from_secs(5);
 /// Blur radius for `blur on`, in frame pixels.
 const DEFAULT_BLUR: usize = 24;
 /// How far each new mask moves the smoothed one.
 const MASK_FOLLOW: f32 = 0.5;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
+static RESTART: AtomicBool = AtomicBool::new(false);
+
+/// True, once, after a command asked for the session to be rebuilt (a new resolution).
+pub fn take_restart() -> bool {
+    RESTART.swap(false, Ordering::Relaxed)
+}
 
 extern "C" fn on_signal(_: libc::c_int) {
     TERMINATE.store(true, Ordering::Relaxed);
@@ -105,6 +113,7 @@ struct Session {
     led: StreamId,
     seg_ctrl: StreamId,
     face_ctrl: StreamId,
+    resolution: Resolution,
     output: Option<PathBuf>,
     state: Mutex<State>,
     blur: Mutex<Blur>,
@@ -112,6 +121,8 @@ struct Session {
     zoom: Mutex<Zoom>,
     settings: Mutex<Settings>,
     frames: AtomicU64,
+    /// Average chip temperature in degrees C.
+    temperature: Mutex<Option<f32>>,
     last_frame: Mutex<Vec<u8>>,
     alive: AtomicBool,
 }
@@ -184,8 +195,13 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {} zoom {}",
+                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {} zoom {}",
                     format!("{:?}", st.mode).to_lowercase(),
+                    self.resolution.name(),
+                    self.temperature
+                        .lock()
+                        .unwrap()
+                        .map_or("-".into(), |t| format!("{t:.1}")),
                     st.streaming,
                     st.consumers,
                     self.frames.load(Ordering::Relaxed),
@@ -222,6 +238,13 @@ impl Session {
                     "fast" => Speed::Fast,
                     _ => bail!("tracking slow, normal or fast"),
                 };
+                Ok(String::new())
+            }
+            ["resolution", name] => {
+                let res = Resolution::parse(name).ok_or_else(|| anyhow!("resolution 720p, 1080p or 1440p"))?;
+                if res != self.resolution {
+                    RESTART.store(true, Ordering::Relaxed);
+                }
                 Ok(String::new())
             }
             ["settings"] => Ok(self.settings.lock().unwrap().commands().collect::<Vec<_>>().join("; ")),
@@ -292,7 +315,8 @@ impl Session {
 
     /// Writes the luma plane of the latest frame as a PGM image.
     fn snap(&self, path: &Path) -> Result<()> {
-        let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
+        let (w, h) = self.resolution.size();
+        let (w, h) = (w as usize, h as usize);
         let last = self.last_frame.lock().unwrap();
         anyhow::ensure!(last.len() >= w * h, "no frame yet");
         let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
@@ -334,8 +358,8 @@ fn log_level(name: &str) -> Option<i32> {
 }
 
 /// Black NV12 frame, written first so apps can open the output before video arrives.
-fn black_frame() -> Vec<u8> {
-    let y = (opal_c1::VIDEO_WIDTH * opal_c1::VIDEO_HEIGHT) as usize;
+fn black_frame((w, h): (u32, u32)) -> Vec<u8> {
+    let y = (w * h) as usize;
     let mut f = vec![0u8; y];
     f.resize(y + y / 2, 128);
     f
@@ -390,18 +414,20 @@ pub fn run(
     dev: Device,
     dir: &Path,
     sensor: &str,
+    resolution: Resolution,
     output: Option<PathBuf>,
     settings: Settings,
     overrides: &[String],
 ) -> Result<()> {
+    let (vw, vh) = resolution.size();
     let output = output
         .map(|p| p.canonicalize().with_context(|| p.display().to_string()))
         .transpose()?;
     let mut out = match &output {
         Some(path) => {
-            let mut o = opal_v4l2::Output::open(path, opal_c1::VIDEO_WIDTH, opal_c1::VIDEO_HEIGHT, opal_v4l2::NV12)
-                .with_context(|| path.display().to_string())?;
-            o.write(&black_frame())?;
+            let mut o =
+                opal_v4l2::Output::open(path, vw, vh, opal_v4l2::NV12).with_context(|| path.display().to_string())?;
+            o.write(&black_frame((vw, vh)))?;
             Some(o)
         }
         None => None,
@@ -410,7 +436,7 @@ pub fn run(
     if let Some(level) = std::env::var("OPAL_RS_LOG").ok().and_then(|l| log_level(&l)) {
         dev.call("setLogLevel", vec![level.into()])?;
     }
-    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor)?)?;
+    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution)?)?;
     let session = Arc::new(Session {
         link: dev.link().clone(),
         control: streams[opal_c1::CONTROL_STREAM],
@@ -418,6 +444,7 @@ pub fn run(
         led: streams[opal_c1::LED_STREAM],
         seg_ctrl: streams[opal_c1::SEGMENTATION_CONTROL_STREAM],
         face_ctrl: streams[opal_c1::FACE_CONTROL_STREAM],
+        resolution,
         output: output.clone(),
         state: Mutex::new(State {
             mode: Mode::Auto,
@@ -430,12 +457,13 @@ pub fn run(
         look: Mutex::new(None),
         zoom: Mutex::new(Zoom {
             enabled: false,
-            framing: Framing::new(opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize),
+            framing: Framing::new(vw as usize, vh as usize),
             tracker: Tracker::default(),
             faces: 0,
         }),
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
+        temperature: Mutex::new(None),
         last_frame: Mutex::new(Vec::new()),
         alive: AtomicBool::new(true),
     });
@@ -456,7 +484,7 @@ pub fn run(
     {
         let session = session.clone();
         std::thread::spawn(move || {
-            let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
+            let (w, h) = (vw as usize, vh as usize);
             let mut effects = BackgroundBlur::new(w, h);
             let mut frame = Vec::new();
             let mut zoomed = Vec::new();
@@ -562,10 +590,23 @@ pub fn run(
     println!("running");
 
     let mut result = Ok(());
-    while !TERMINATE.load(Ordering::Relaxed) {
+    let mut last_temperature = Instant::now() - TEMPERATURE_PERIOD;
+    while !TERMINATE.load(Ordering::Relaxed) && !RESTART.load(Ordering::Relaxed) {
         if !session.alive.load(Ordering::Relaxed) {
             result = Err(anyhow!("camera disconnected"));
             break;
+        }
+        if last_temperature.elapsed() >= TEMPERATURE_PERIOD {
+            last_temperature = Instant::now();
+            let t = dev.call("getChipTemperature", vec![]).ok().and_then(|v| match v {
+                opal_dai::msgpack::Value::Map(m) => m.get("average").and_then(|a| match a {
+                    opal_dai::msgpack::Value::F32(f) => Some(*f),
+                    opal_dai::msgpack::Value::F64(f) => Some(*f as f32),
+                    _ => None,
+                }),
+                _ => None,
+            });
+            *session.temperature.lock().unwrap() = t;
         }
         let consumers = output.as_deref().map(count_consumers);
         if let Err(e) = session.update(consumers) {
