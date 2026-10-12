@@ -11,4 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 opal-ipc = { version = "0.1.0", path = "../ipc" }
+
+[target.'cfg(unix)'.dependencies]
 ksni = { version = "0.3.6", features = ["blocking"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }

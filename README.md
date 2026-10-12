@@ -1,6 +1,6 @@
 # opal-rs
 
-Linux host software for the Opal C1 webcam, written in Rust.
+Linux and Windows host software for the Opal C1 webcam, written in Rust.
 
 **No Opal software is included.** The repository holds no firmware, neural networks, tuning data or code from Opal
 Composer. The files the camera needs are extracted from your own copy of the Opal Composer disk image; see
@@ -34,7 +34,9 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Shows a camera-off picture while your video is off, and turns the camera off while the screen is locked.
 - A tray icon shows when the camera is on and turns the video on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
-- `opal-rs webcam` runs the camera as an ordinary webcam with no service, on Linux or (experimental) Windows.
+- `opal-rs webcam` runs the camera as an ordinary webcam with no service.
+- Windows 11: the same, with a Windows virtual camera, control panel and tray icon (not yet tried on a real
+  machine; see [INSTALL.md](INSTALL.md)).
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
 

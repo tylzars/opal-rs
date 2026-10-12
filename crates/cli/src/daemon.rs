@@ -951,11 +951,62 @@ fn is_effect(command: &str) -> bool {
     )
 }
 
+/// Largest preview width; the latest frame is averaged down to about this.
+const PREVIEW_WIDTH: usize = 640;
+
+/// Replies with the latest frame shrunk for the control panel: `bytes <n> <width> <height>`, then NV12.
+fn send_preview(session: &Session, mut stream: opal_ipc::Stream) -> Result<()> {
+    let (w, h) = session.resolution.size();
+    let (w, h) = (w as usize, h as usize);
+    let small = {
+        let last = session.last_frame.lock().unwrap();
+        (last.len() >= w * h * 3 / 2).then(|| shrink_nv12(&last, w, h, w.div_ceil(PREVIEW_WIDTH)))
+    };
+    match small {
+        Some((data, sw, sh)) => {
+            writeln!(stream, "bytes {} {sw} {sh}", data.len())?;
+            stream.write_all(&data)?;
+        }
+        None => writeln!(stream, "error: no frame yet")?,
+    }
+    Ok(())
+}
+
+/// Averages `step` x `step` blocks of a `w` x `h` NV12 frame. Returns the frame and its even width and height.
+fn shrink_nv12(frame: &[u8], w: usize, h: usize, step: usize) -> (Vec<u8>, usize, usize) {
+    let (sw, sh) = ((w / step) & !1, (h / step) & !1);
+    let mut out = vec![0u8; sw * sh * 3 / 2];
+    let n = (step * step) as u32;
+    for y in 0..sh {
+        for x in 0..sw {
+            let sum: u32 = (0..step)
+                .flat_map(|dy| &frame[(y * step + dy) * w + x * step..][..step])
+                .map(|&p| p as u32)
+                .sum();
+            out[y * sw + x] = ((sum + n / 2) / n) as u8;
+        }
+    }
+    // Chroma: each small UV pair takes the source pair at the centre of its block.
+    let chroma = &frame[w * h..];
+    for y in 0..sh / 2 {
+        let sy = (y * step + step / 2).min(h / 2 - 1);
+        for x in 0..sw / 2 {
+            let sx = (x * step + step / 2).min(w / 2 - 1);
+            out[sw * sh + y * sw + 2 * x] = chroma[sy * w + 2 * sx];
+            out[sw * sh + y * sw + 2 * x + 1] = chroma[sy * w + 2 * sx + 1];
+        }
+    }
+    (out, sw, sh)
+}
+
 fn handle(session: &Session, stream: opal_ipc::Stream) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let line = line.trim();
+    if line == "preview" {
+        return send_preview(session, stream);
+    }
     let reply = if line == "quit" {
         crate::request_stop();
         Ok(String::new())
@@ -1496,6 +1547,17 @@ mod tests {
         assert_eq!((r.x, r.y, r.width, r.height), (480.0, 270.0, 960.0, 540.0));
         let r = centre_crop(1280, 720, 1.0);
         assert_eq!((r.x, r.y, r.width, r.height), (0.0, 0.0, 1280.0, 720.0));
+    }
+
+    #[test]
+    fn preview_shrink_keeps_flat_frames() {
+        let (w, h) = (24, 12);
+        let mut f = vec![80u8; w * h];
+        f.extend([100u8, 150].repeat(w * h / 4));
+        let (small, sw, sh) = shrink_nv12(&f, w, h, 3);
+        assert_eq!((sw, sh), (8, 4));
+        assert!(small[..sw * sh].iter().all(|&p| p == 80));
+        assert_eq!(&small[sw * sh..sw * sh + 2], [100, 150]);
     }
 
     #[test]

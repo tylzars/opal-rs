@@ -142,6 +142,26 @@ pub fn request(command: &str, timeout: Duration) -> io::Result<String> {
     Ok(reply.trim_end().to_owned())
 }
 
+/// Sends one command whose reply is binary: a line `bytes <n> <words...>` and then n bytes. Returns the words and
+/// the bytes; any other reply line comes back as an error.
+pub fn request_data(command: &str, timeout: Duration) -> io::Result<(String, Vec<u8>)> {
+    let mut s = connect()?;
+    s.set_read_timeout(Some(timeout))?;
+    writeln!(s, "{command}")?;
+    let mut reader = BufReader::new(&s);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let rest = line
+        .trim_end()
+        .strip_prefix("bytes ")
+        .ok_or_else(|| io::Error::other(line.trim_end().to_owned()))?;
+    let (n, words) = rest.split_once(' ').unwrap_or((rest, ""));
+    let n: usize = n.parse().map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let mut data = vec![0u8; n];
+    reader.read_exact(&mut data)?;
+    Ok((words.to_owned(), data))
+}
+
 /// 128 random bits as hex, from the standard library's randomly keyed hasher.
 #[cfg(not(unix))]
 fn new_token() -> String {

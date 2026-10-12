@@ -142,8 +142,9 @@ impl State {
                 SCENE.map(|rgb| to_color(cube.as_ref().map_or(rgb, |c| c.sample(rgb))))
             })
             .collect();
-        let can_browse =
-            std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("zenity").is_file()));
+        // Windows always has its Open dialog; Linux needs zenity.
+        let can_browse = cfg!(windows)
+            || std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("zenity").is_file()));
         Self {
             more: false,
             help: false,
@@ -176,19 +177,40 @@ impl State {
 
     /// Opens the desktop file picker without blocking the window.
     fn browse(&self, ctx: &egui::Context, pick: Pick) {
-        let (title, filter) = match pick {
-            Pick::Background => (
-                "Choose a background picture",
-                "Pictures | *.jpg *.jpeg *.png *.JPG *.JPEG *.PNG",
-            ),
-            Pick::Look => ("Choose a look file", "Look files | *.cube *.CUBE"),
-            Pick::Sticker => ("Choose a picture", "Pictures | *.png *.jpg *.jpeg *.PNG *.JPG *.JPEG"),
+        let (title, kind, extensions) = match pick {
+            Pick::Background => ("Choose a background picture", "Pictures", &["jpg", "jpeg", "png"][..]),
+            Pick::Look => ("Choose a look file", "Look files", &["cube"][..]),
+            Pick::Sticker => ("Choose a picture", "Pictures", &["png", "jpg", "jpeg"][..]),
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let patterns: Vec<String> = extensions
+                .iter()
+                .flat_map(|e| [format!("*.{e}"), format!("*.{}", e.to_uppercase())])
+                .collect();
+            let mut c = Command::new("zenity");
+            c.args(["--file-selection", "--title", title, "--file-filter"])
+                .arg(format!("{kind} | {}", patterns.join(" ")));
+            c
+        };
+        #[cfg(windows)]
+        let mut command = {
+            // The standard Open dialog, through PowerShell; it prints the chosen file.
+            let patterns: Vec<String> = extensions.iter().map(|e| format!("*.{e}")).collect();
+            let script = format!(
+                "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
+                 $d.Title = '{title}'; $d.Filter = '{kind}|{}'; if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}",
+                patterns.join(";")
+            );
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-STA", "-Command", &script]);
+            // No console window flashing up.
+            std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+            c
         };
         let (slot, ctx) = (self.picked.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let out = Command::new("zenity")
-                .args(["--file-selection", "--title", title, "--file-filter", filter])
-                .output();
+            let out = command.output();
             if let Ok(out) = out
                 && out.status.success()
             {

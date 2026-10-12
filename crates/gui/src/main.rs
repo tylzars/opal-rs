@@ -1,4 +1,5 @@
 //! Control panel for the opal-rs camera service.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod debug;
 mod overlay;

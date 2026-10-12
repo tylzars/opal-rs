@@ -1,7 +1,7 @@
 # Installing
 
 ## Requirements
-- Linux (Windows: see [Windows](#windows-experimental))
+- Linux, or Windows 11: see [Windows](#windows-not-yet-tried-on-a-real-machine)
 - A Rust toolchain (`cargo`)
 - Your own copy of the Opal Composer disk image listed in [README.md](README.md)
 
@@ -102,24 +102,38 @@
 Starting the service reboots the camera, which drops it off USB for a few seconds. `opal-rs` refuses to boot it again
 within a minute.
 
-## Windows (experimental)
-On Windows only `opal-rs webcam` is available: it boots the camera in low power mode and keeps its own 1080p video on
-until Ctrl-C, so apps see an ordinary webcam with autofocus and auto exposure. There are no effects, no control
-panel and no service yet. `list`, `info` and `assets` work too.
+## Windows (not yet tried on a real machine)
+Windows 11 is needed: the virtual camera uses Windows 11's virtual camera support. Everything from Linux is there:
+the "Opal C1 Virtual" camera with effects, `ctl`, the control panel and the tray icon. Low power mode streams for as
+long as the service runs, as Windows does not say which apps use the camera's own video.
 
-1. Build `opal-rs.exe`, on Windows with `cargo build --release -p opal-rs`, or from Linux with the MinGW linker
-   (`sudo apt install gcc-mingw-w64-x86-64`):
+1. Build the four files, from Linux with the MinGW linker (`sudo apt install gcc-mingw-w64-x86-64`) or on Windows:
    ```shell
    rustup target add x86_64-pc-windows-gnu
-   cargo build --release -p opal-rs --target x86_64-pc-windows-gnu
+   cargo build --release --target x86_64-pc-windows-gnu -p opal-rs -p opal-gui -p opal-tray -p opal-vcam
    ```
-2. Put `opal-rs.exe` in a folder with an `assets` folder next to it, put the disk image in `assets`, and run
-   `opal-rs assets extract`. (Or point `OPAL_RS_ASSETS` at a folder holding the camera files.)
-3. The camera asks Windows for the WinUSB driver on its data link (interface 0) in every state it boots through, so
-   Windows 8 and later install it on their own. Only if `opal-rs list` shows no camera, install WinUSB for interface
-   0 with [Zadig](https://zadig.akeo.ie/) (Options > List All Devices), for each USB id the camera shows up under.
-   Leave the video and audio interfaces alone.
-4. Run `opal-rs webcam` and pick "Opal C1" in your app.
+   They are `opal-rs.exe`, `opal-rs-gui.exe`, `opal-rs-tray.exe` and `opal_vcam.dll` in
+   `target/x86_64-pc-windows-gnu/release`.
+2. Make a folder `C:\Program Files\opal-rs` and copy them there, with an `assets` folder holding the disk image. It
+   has to be a folder like this one: Windows' camera service loads `opal_vcam.dll` and cannot read your user folders.
+3. In that folder, in a PowerShell opened as administrator, register the virtual camera and extract the camera files:
+   ```powershell
+   regsvr32 opal_vcam.dll
+   .\opal-rs assets extract
+   ```
+4. Start `opal-rs-tray.exe`. It starts the service, and "Opal C1 Virtual" appears in your apps. To have it start when
+   you sign in, press Win+R, enter `shell:startup` and put a shortcut to `opal-rs-tray.exe` in the folder that opens.
+5. `opal-rs ctl status` and the other `ctl` commands work as on Linux. Settings, presets and stickers are kept in
+   `%APPDATA%\opal-rs`; the service writes its log to `%LOCALAPPDATA%\opal-rs\service.log`.
+
+The camera asks Windows for the WinUSB driver on its data link (interface 0) in every state it boots through, so
+Windows installs it on its own. Only if `opal-rs list` shows no camera, install WinUSB for interface 0 with
+[Zadig](https://zadig.akeo.ie/) (Options > List All Devices), for each USB id the camera shows up under, leaving the
+video and audio interfaces alone.
+
+`opal-rs webcam` also works without the rest: the camera as an ordinary 1080p webcam until Ctrl-C.
+
+To remove the virtual camera, run `regsvr32 /u opal_vcam.dll` as administrator.
 
 ## Tests
 ```shell

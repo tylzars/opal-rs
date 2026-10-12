@@ -31,11 +31,14 @@ pub fn histogram(rgb: &[u8]) -> [u32; BINS] {
     bins
 }
 
-/// Where the panel keeps its own choices: `~/.config/opal-rs/panel`.
+/// Where the panel keeps its own choices: `~/.config/opal-rs/panel`, or `%APPDATA%\opal-rs\panel` on Windows.
 fn path() -> Option<PathBuf> {
+    #[cfg(unix)]
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    #[cfg(windows)]
+    let base = PathBuf::from(std::env::var_os("APPDATA")?);
     Some(base.join("opal-rs").join("panel"))
 }
 

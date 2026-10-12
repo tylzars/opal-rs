@@ -78,6 +78,20 @@ impl Handle {
         let size = [width / step, height / step];
         std::thread::spawn(move || {
             let current = || shared.lock().unwrap().generation == generation;
+            // Hands a frame to the window; false once this thread is no longer wanted.
+            let store = |rgb: Vec<u8>, size: [usize; 2]| {
+                let mut s = shared.lock().unwrap();
+                if s.generation != generation {
+                    return false;
+                }
+                s.frame = Some((rgb, size));
+                s.last_frame = Some(Instant::now());
+                drop(s);
+                ctx.request_repaint();
+                true
+            };
+            // Linux reads the device apps see.
+            #[cfg(unix)]
             let result = (|| -> std::io::Result<()> {
                 let mut cap = opal_v4l2::Capture::open(&device, width as u32, height as u32, opal_v4l2::NV12)?;
                 let mut last = Instant::now() - Duration::from_secs(1);
@@ -88,15 +102,34 @@ impl Handle {
                     })?;
                     if let Some(rgb) = rgb {
                         last = Instant::now();
-                        let mut s = shared.lock().unwrap();
-                        if s.generation != generation {
+                        if !store(rgb, size) {
                             break;
                         }
-                        s.frame = Some((rgb, size));
-                        s.last_frame = Some(last);
-                        drop(s);
-                        ctx.request_repaint();
                     }
+                }
+                Ok(())
+            })();
+            // Windows asks the service for small frames.
+            #[cfg(windows)]
+            let result = (|| -> std::io::Result<()> {
+                let _ = (size, step);
+                while current() {
+                    let asked = Instant::now();
+                    match opal_ipc::request_data("preview", Duration::from_secs(5)) {
+                        Ok((words, data)) => {
+                            let mut n = words.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
+                            if let (Some(w), Some(h)) = (n.next(), n.next())
+                                && data.len() >= w * h * 3 / 2
+                                && !store(nv12_to_rgb_small(&data, w, h, 1), [w, h])
+                            {
+                                break;
+                            }
+                        }
+                        // The service answers, just without a frame yet.
+                        Err(e) if e.kind() == std::io::ErrorKind::Other => {}
+                        Err(e) => return Err(e),
+                    }
+                    std::thread::sleep(Duration::from_millis(80).saturating_sub(asked.elapsed()));
                 }
                 Ok(())
             })();
