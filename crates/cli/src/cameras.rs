@@ -62,11 +62,13 @@ fn parse(text: &str) -> Option<Vec<Camera>> {
             _ => {}
         }
     }
-    let cameras: Vec<Camera> = numbers
+    let mut cameras: Vec<Camera> = numbers
         .into_iter()
         .zip(names)
         .map_while(|(nr, name)| Some(Camera { nr: nr?, name }))
         .collect();
+    // The main camera first even in a file edited by hand; the rest by number.
+    cameras.sort_by_key(|c| (c.nr != main_camera().nr, c.nr));
     (!cameras.is_empty()).then_some(cameras)
 }
 
@@ -236,6 +238,8 @@ mod tests {
         let shipped = parse(include_str!("../../../dist/v4l2loopback.conf")).unwrap();
         assert_eq!(shipped, vec![main_camera()]);
         assert_eq!(parse("# nothing\n"), None);
+        let edited = parse("options v4l2loopback video_nr=12,10,11 card_label=\"B,Opal C1 Virtual,A\"").unwrap();
+        assert_eq!(edited.iter().map(|c| c.nr).collect::<Vec<_>>(), [10, 11, 12]);
     }
 
     #[test]

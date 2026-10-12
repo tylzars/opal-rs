@@ -45,12 +45,18 @@ struct Sink {
 }
 
 impl Outputs {
-    /// Sends a frame to every camera an app is using.
+    /// Sends a frame to the main camera, and to each extra one an app is using. The main camera always gets it, so
+    /// an app opening it starts with the live picture rather than black.
     pub fn write(&mut self, frame: &[u8]) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             let mut result = Ok(());
-            for s in self.sinks.iter_mut().filter(|s| !s.users.is_empty()) {
+            let main = self.main.nr;
+            for s in self
+                .sinks
+                .iter_mut()
+                .filter(|s| s.camera.nr == main || !s.users.is_empty())
+            {
                 if let Err(e) = s.device.write(frame) {
                     result = Err(e);
                 }
