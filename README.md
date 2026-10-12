@@ -15,7 +15,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
   ("Opal C1 Virtual", via `v4l2loopback`), the microphone appears as a normal USB microphone.
 - Streams only while an app uses the camera; the status LED is white while it streams.
 - Focus, exposure, white balance, image adjustments and microphone gain.
-- Background blur, using person segmentation running on the camera.
+- Background blur or a background picture, using person segmentation running on the camera.
 - Colour looks from Adobe `.cube` files.
 - Face framing: the picture follows your face, using face detection running on the camera.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.

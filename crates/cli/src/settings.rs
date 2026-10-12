@@ -38,6 +38,7 @@ fn group(command: &str) -> Option<&'static str> {
         "gain" => "gain",
         "blur" => "blur",
         "lut" => "lut",
+        "background" => "background",
         "zoom" => "zoom",
         "tracking" => "tracking",
         "resolution" => "resolution",
@@ -70,7 +71,7 @@ impl Settings {
         let Some(g) = group(command) else {
             return Ok(());
         };
-        if command.split_whitespace().eq(["lut", "off"]) {
+        if command.split_whitespace().eq(["lut", "off"]) || command.split_whitespace().eq(["background", "off"]) {
             self.commands.remove(g);
         } else {
             self.commands

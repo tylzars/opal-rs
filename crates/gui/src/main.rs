@@ -65,6 +65,8 @@ struct Controls {
     gain: f32,
     blur: bool,
     blur_radius: i32,
+    background: String,
+    background_on: bool,
     look: String,
     look_on: bool,
     look_amount: f32,
@@ -92,6 +94,8 @@ impl Default for Controls {
             gain: 0.0,
             blur: false,
             blur_radius: 24,
+            background: String::new(),
+            background_on: false,
             look: String::new(),
             look_on: false,
             look_amount: 1.0,
@@ -129,6 +133,8 @@ impl Controls {
                 ["blur", "off" | "0"] => c.blur = false,
                 ["blur", "on"] => c.blur = true,
                 ["blur", _] => (c.blur, c.blur_radius) = (true, int(1).unwrap_or(c.blur_radius)),
+                ["background", "off"] => c.background_on = false,
+                ["background", path] => (c.background, c.background_on) = ((*path).to_owned(), true),
                 ["lut", path, rest @ ..] => {
                     c.look = (*path).to_owned();
                     c.look_on = true;
@@ -358,6 +364,18 @@ impl App {
             .changed()
         {
             cmds.push(format!("blur {}", c.blur_radius));
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Background picture");
+            ui.text_edit_singleline(&mut c.background);
+        });
+        if ui.checkbox(&mut c.background_on, "Replace background").changed() {
+            cmds.push(if c.background_on {
+                format!("background {}", c.background)
+            } else {
+                "background off".into()
+            });
         }
 
         ui.horizontal(|ui| {

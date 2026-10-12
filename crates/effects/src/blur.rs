@@ -217,6 +217,37 @@ impl BackgroundBlur {
         });
     }
 
+    /// Shows `background`, an NV12 frame of the same size, where `mask` is low.
+    pub fn replace(&mut self, frame: &mut [u8], mask: &Mask, background: &[u8]) {
+        let (w, h, sw) = (self.width, self.height, self.small_w);
+        let n = w * h * 3 / 2;
+        assert!(frame.len() >= n && background.len() >= n);
+        self.resample_mask(mask);
+        let (luma, chroma) = frame[..n].split_at_mut(w * h);
+        let (bg_luma, bg_chroma) = background[..n].split_at(w * h);
+        let alpha = &self.alpha;
+        for (plane, bg, tx, ty, channels) in [
+            (luma, bg_luma, &self.luma_x, &self.luma_y, 1),
+            (chroma, bg_chroma, &self.chroma_x, &self.chroma_y, 2),
+        ] {
+            par_rows(plane, w, self.threads, |first, rows| {
+                for (i, row) in rows.chunks_exact_mut(w).enumerate() {
+                    let (y0, y1, wy) = ty[first + i];
+                    let (a0, a1) = (&alpha[y0 as usize * sw..][..sw], &alpha[y1 as usize * sw..][..sw]);
+                    let bg_row = &bg[(first + i) * w..][..w];
+                    for (x, (px, &b)) in row.iter_mut().zip(bg_row).enumerate() {
+                        let (x0, x1, wx) = tx[x / channels];
+                        let (x0, x1) = (x0 as usize, x1 as usize);
+                        let a = bilinear(a0[x0], a0[x1], a1[x0], a1[x1], wx, wy);
+                        if a < 255 {
+                            *px = mix(*px, b as u32, a);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// Averages luma over SCALE x SCALE blocks and chroma over 2 x 2 blocks.
     fn downscale(&mut self, luma: &[u8], chroma: &[u8]) {
         let (w, sw) = (self.width, self.small_w);
@@ -317,6 +348,19 @@ mod tests {
         assert!(row[W / 2 - 1] > 20 && row[W / 2] < 180, "{row:?}");
         // Uniform chroma is unchanged.
         assert_eq!(&f[W * H..], &original[W * H..]);
+    }
+
+    #[test]
+    fn background_replaces_outside_the_person() {
+        let original = frame(|_, _| 50);
+        let mut bg = vec![200u8; W * H];
+        bg.extend(vec![128u8; W * H / 2]);
+        let mut f = original.clone();
+        BackgroundBlur::new(W, H).replace(&mut f, &mask(0.0), &bg);
+        assert!(f[..W * H].iter().all(|&p| p == 200));
+        let mut f = original.clone();
+        BackgroundBlur::new(W, H).replace(&mut f, &mask(1.0), &bg);
+        assert_eq!(f, original);
     }
 
     #[test]

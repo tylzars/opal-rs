@@ -76,9 +76,42 @@ struct State {
 struct Blur {
     /// In frame pixels; 0 is off.
     radius: usize,
+    /// Picture shown instead of the background, as an NV12 frame.
+    background: Option<(String, Arc<Vec<u8>>)>,
     mask: Option<Mask>,
     masks: u64,
     layout: String,
+}
+
+/// A picture, scaled and cropped to cover a `width` x `height` frame, as full-range BT.601 NV12.
+fn load_background(path: &Path, width: u32, height: u32) -> Result<Vec<u8>> {
+    let img = image::open(path).with_context(|| path.display().to_string())?.to_rgb8();
+    let scale = (width as f32 / img.width() as f32).max(height as f32 / img.height() as f32);
+    let (cw, ch) = ((width as f32 / scale) as u32, (height as f32 / scale) as u32);
+    let (cx, cy) = (
+        (img.width() - cw.min(img.width())) / 2,
+        (img.height() - ch.min(img.height())) / 2,
+    );
+    let crop = image::imageops::crop_imm(&img, cx, cy, cw, ch).to_image();
+    let rgb = image::imageops::resize(&crop, width, height, image::imageops::FilterType::Triangle);
+    let (w, h) = (width as usize, height as usize);
+    let mut nv12 = vec![0u8; w * h * 3 / 2];
+    let luma = |p: &image::Rgb<u8>| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+    for (i, p) in rgb.pixels().enumerate() {
+        nv12[i] = luma(p).round() as u8;
+    }
+    for y in 0..h / 2 {
+        for x in 0..w / 2 {
+            let p = rgb.get_pixel(2 * x as u32, 2 * y as u32);
+            let l = luma(p);
+            let u = 128.0 + (p[2] as f32 - l) / 1.772;
+            let v = 128.0 + (p[0] as f32 - l) / 1.402;
+            let at = w * h + y * w + 2 * x;
+            nv12[at] = u.round().clamp(0.0, 255.0) as u8;
+            nv12[at + 1] = v.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Ok(nv12)
 }
 
 /// Colour lookup table applied to every frame.
@@ -195,7 +228,7 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {} zoom {}",
+                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {}",
                     format!("{:?}", st.mode).to_lowercase(),
                     self.resolution.name(),
                     self.temperature
@@ -206,6 +239,7 @@ impl Session {
                     st.consumers,
                     self.frames.load(Ordering::Relaxed),
                     blur.radius,
+                    blur.background.as_ref().map_or("none", |b| b.0.as_str()),
                     blur.masks,
                     person,
                     look,
@@ -261,6 +295,32 @@ impl Session {
                 *self.look.lock().unwrap() = Some(load_look(Path::new(path), amount)?);
                 Ok(String::new())
             }
+            ["background", "off"] => {
+                let mut blur = self.blur.lock().unwrap();
+                blur.background = None;
+                if blur.radius == 0 {
+                    self.link
+                        .write(self.seg_ctrl, &NnConfig { process_inputs: false }.to_packet())?;
+                    blur.mask = None;
+                }
+                Ok(String::new())
+            }
+            ["background", path] => {
+                let (w, h) = self.resolution.size();
+                let image = load_background(Path::new(path), w, h)?;
+                let name = Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let mut blur = self.blur.lock().unwrap();
+                if blur.radius == 0 && blur.background.is_none() {
+                    self.link
+                        .write(self.seg_ctrl, &NnConfig { process_inputs: true }.to_packet())?;
+                }
+                blur.background = Some((name, Arc::new(image)));
+                Ok(String::new())
+            }
             ["blur", radius] => {
                 let radius: usize = match *radius {
                     "off" => 0,
@@ -268,7 +328,7 @@ impl Session {
                     r => r.parse()?,
                 };
                 let mut blur = self.blur.lock().unwrap();
-                if (radius > 0) != (blur.radius > 0) {
+                if (radius > 0) != (blur.radius > 0) && blur.background.is_none() {
                     let config = NnConfig {
                         process_inputs: radius > 0,
                     };
@@ -498,11 +558,18 @@ pub fn run(
                 if let (Some((lut, amount)), true) = (look, frame.len() >= w * h * 3 / 2) {
                     lut.apply(&mut frame, w, h, amount);
                 }
-                let (radius, mask) = {
+                let (radius, mask, background) = {
                     let blur = session.blur.lock().unwrap();
-                    (blur.radius, blur.mask.clone())
+                    (
+                        blur.radius,
+                        blur.mask.clone(),
+                        blur.background.as_ref().map(|b| b.1.clone()),
+                    )
                 };
-                if let (r @ 1.., Some(mask), true) = (radius, &mask, frame.len() >= w * h * 3 / 2) {
+                if let (Some(bg), Some(mask), true) = (&background, &mask, frame.len() >= w * h * 3 / 2) {
+                    effects.replace(&mut frame, mask, bg);
+                }
+                if let (r @ 1.., Some(mask), None, true) = (radius, &mask, &background, frame.len() >= w * h * 3 / 2) {
                     effects.apply(&mut frame, mask, r);
                 }
                 let crop = {
@@ -644,7 +711,7 @@ pub fn send(words: &[String]) -> Result<bool> {
     let mut words = words.to_vec();
     // Paths are resolved by the daemon, which runs in another directory.
     if let [cmd, path, ..] = words.as_mut_slice()
-        && matches!(cmd.as_str(), "lut" | "snap")
+        && matches!(cmd.as_str(), "lut" | "snap" | "background")
         && path != "off"
     {
         *path = std::path::absolute(&*path)?.display().to_string();
