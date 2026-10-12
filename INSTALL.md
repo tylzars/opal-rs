@@ -12,15 +12,30 @@ The package and the installer are made as described in [Building the packages](#
 ```shell
 sudo apt install ./opal-rs_0.1.0-1_amd64.deb
 ```
-The "Opal C1 Virtual" camera uses the kernel's `v4l2loopback` module, which current Ubuntu kernels include. If the
-install says this kernel has none, also install `v4l2loopback-dkms`; on a computer with Secure Boot that one asks you
-to set a password and confirm it once after a restart (MOK enrollment). If the install says v4l2loopback was already
-loaded with other settings, restart the computer.
+The "Opal C1 Virtual" camera uses the kernel's `v4l2loopback` module, which Ubuntu 24.04's kernels include (6.8 and
+the newer HWE kernels). If the install says this kernel has none, also install `v4l2loopback-dkms`; on a computer
+with Secure Boot that one asks you to set a password and confirm it once after a restart (MOK enrollment). If the
+install says v4l2loopback was already loaded with other settings, restart the computer.
 
 Then log out and back in: the service and the tray icon start on their own. Open "Opal C1 Control" from the app menu
 for the control panel. To remove it, see [Uninstalling](#uninstalling).
 
 Other Linux distributions: build from source, below.
+
+### Using the camera in several apps at once (Linux)
+On Linux an app takes a camera for itself: while one app uses "Opal C1 Virtual", another cannot. Add a camera for
+each extra app in the control panel (Virtual cameras), or:
+```shell
+opal-rs cameras                 # list them and which app uses each
+opal-rs cameras add "Zoom"      # asks for your password
+opal-rs cameras remove "Zoom"
+opal-rs cameras apply           # make changes that waited for the cameras to be free
+```
+They all show the same video and effects; pick a different one in each app. Adding or removing one reloads
+v4l2loopback, which only works while no app uses an Opal camera; otherwise the change waits for `opal-rs cameras
+apply` or the next restart. There can be four extra cameras, named with letters, digits, spaces and `- _ . ( )`.
+They are kept in `/etc/modprobe.d/opal-rs-v4l2loopback.conf`, which uninstalling removes. Windows shares a camera
+between apps itself, so there is one camera there.
 
 ### Windows 11 (not yet tried on a real machine)
 Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the

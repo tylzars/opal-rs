@@ -1,6 +1,8 @@
 //! Control panel for the opal-rs camera service.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(unix)]
+mod cameras;
 mod debug;
 mod overlay;
 mod preview;
@@ -249,6 +251,8 @@ pub(crate) fn load_settings() -> (Controls, String) {
 pub(crate) struct Lists {
     pub presets: String,
     pub stickers: String,
+    /// The service's `cameras` reply (Linux).
+    pub cameras: String,
     /// Set by the window to ask for a fresh read; cleared once read.
     pub stale: bool,
     /// Bumped on every read, so the window knows to take the new lists.
@@ -268,8 +272,13 @@ fn poll_status_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Arc<Mutex
             if tick.is_multiple_of(3) || lists.lock().unwrap().stale {
                 let presets = send("preset list").unwrap_or_default();
                 let stickers = send("sticker list").unwrap_or_default();
+                let cameras = if cfg!(unix) {
+                    send("cameras").unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let mut l = lists.lock().unwrap();
-                (l.presets, l.stickers, l.stale) = (presets, stickers, false);
+                (l.presets, l.stickers, l.cameras, l.stale) = (presets, stickers, cameras, false);
                 l.serial += 1;
             }
             ctx.request_repaint();

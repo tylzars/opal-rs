@@ -23,7 +23,8 @@ section = "video"
 priority = "optional"
 depends = "$auto, systemd, udev, kmod"
 recommends = "zenity"
-# Newer Ubuntu kernels carry v4l2loopback, signed; the DKMS build would replace it with an older, unsigned one.
+# Ubuntu 24.04's kernels (6.8 and the 7.0 HWE kernel) carry v4l2loopback, signed; the DKMS build would replace it
+# with an older, unsigned one.
 suggests = "v4l2loopback-dkms"
 maintainer-scripts = "../../dist/deb/"
 assets = [
@@ -36,6 +37,7 @@ assets = [
     ["../../dist/deb/opal-rs.service", "usr/lib/systemd/user/", "644"],
     ["../../dist/opal-rs-tray.desktop", "etc/xdg/autostart/", "644"],
     ["../../dist/opal-rs.desktop", "usr/share/applications/", "644"],
+    ["../../dist/deb/io.github.tylzars.opal-rs.policy", "usr/share/polkit-1/actions/", "644"],
     ["../../README.md", "usr/share/doc/opal-rs/", "644"],
 ]
 

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod cameras;
 mod daemon;
 mod mains;
 mod output;
@@ -41,6 +43,12 @@ enum Command {
     },
     /// List attached cameras
     List,
+    /// List the virtual cameras, or add and remove extra ones (one per app that should use the Opal C1 at the
+    /// same time; Linux)
+    Cameras {
+        #[command(subcommand)]
+        command: Option<CamerasCommand>,
+    },
     /// Remove opal-rs, its settings and camera files, and what it set up on this computer
     Uninstall {
         /// Keep settings, presets, stickers and camera files
@@ -83,6 +91,16 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum CamerasCommand {
+    /// Add a camera with this name
+    Add { name: String },
+    /// Remove the camera with this name
+    Remove { name: String },
+    /// Make changes that waited for a camera to be free take effect now
+    Apply,
 }
 
 #[derive(Subcommand)]
@@ -277,6 +295,10 @@ fn boot(dir: &Path, usb_video: bool) -> Result<opal_xlink::Found> {
 
 fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
+    // Run as administrator through pkexec only to change the virtual cameras.
+    if std::env::var_os("PKEXEC_UID").is_some() && !matches!(cli.command, Command::Cameras { command: Some(_) }) {
+        anyhow::bail!("only `opal-rs cameras add` and `remove` run through pkexec");
+    }
     let dir = asset_dir();
     match cli.command {
         Command::Assets { command } => match command {
@@ -416,6 +438,7 @@ fn main() -> Result<ExitCode> {
         } else {
             ExitCode::FAILURE
         }),
+        Command::Cameras { command } => camera_command(command),
         Command::List => {
             for d in opal_xlink::list()? {
                 println!("{:?} {:04x} {}", d.state, d.state.pid(), d.serial().unwrap_or("-"));
@@ -437,4 +460,102 @@ fn sensor_name(dev: &Device) -> Result<String> {
         .and_then(|s| s.as_str())
         .context("no camera sensor")?
         .to_owned())
+}
+
+/// `opal-rs cameras`. Changes run as administrator; the service hands its cameras back first so the module can
+/// reload with the new set, unless an app is using one (then it would not reload anyway).
+#[cfg(unix)]
+fn camera_command(command: Option<CamerasCommand>) -> Result<ExitCode> {
+    let Some(command) = command else {
+        match opal_ipc::request("cameras", Duration::from_secs(3)) {
+            Ok(lines) if !lines.starts_with("error") => {
+                for line in lines.split(" | ") {
+                    let mut w = line.splitn(4, ' ');
+                    let (nr, state, apps, name) = (w.next(), w.next(), w.next(), w.next());
+                    let (Some(nr), Some(state), Some(apps), Some(name)) = (nr, state, apps, name) else {
+                        continue;
+                    };
+                    let note = match (state, apps) {
+                        ("restart", _) => "after the computer restarts".to_owned(),
+                        ("leaving", _) => "removed; goes away when the computer restarts".to_owned(),
+                        ("on", "-") => "free".to_owned(),
+                        ("on", apps) => format!("used by {}", apps.replace(',', ", ")),
+                        _ => "not in use".to_owned(),
+                    };
+                    println!("/dev/video{nr}  {name}  ({note})");
+                }
+            }
+            _ => {
+                for c in cameras::configured() {
+                    let note = if c.present() {
+                        ""
+                    } else {
+                        "  (after the computer restarts)"
+                    };
+                    println!("{}  {}{note}", c.path().display(), c.name);
+                }
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    let (verb, name) = match &command {
+        CamerasCommand::Add { name } => ("add", Some(name)),
+        CamerasCommand::Remove { name } => ("remove", Some(name)),
+        CamerasCommand::Apply => ("apply", None),
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        let applied = match &command {
+            CamerasCommand::Add { name } => cameras::add(name)?,
+            CamerasCommand::Remove { name } => cameras::remove(name)?,
+            CamerasCommand::Apply => cameras::reload()?,
+        };
+        let done = match (verb, name) {
+            ("add", Some(name)) => format!("Added {name}. "),
+            ("remove", Some(name)) => format!("Removed {name}. "),
+            _ => String::new(),
+        };
+        match applied {
+            cameras::Applied::Now if name.is_none() => println!("The cameras are up to date."),
+            cameras::Applied::Now => println!("{}", done.trim_end()),
+            cameras::Applied::AfterRestart => println!(
+                "{done}A camera is in use, so this takes effect when the computer restarts, or with Apply once no \
+                 app uses one."
+            ),
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let current = cameras::configured();
+    match &command {
+        CamerasCommand::Add { name } => cameras::check_name(name, &current)?,
+        CamerasCommand::Remove { name } => {
+            if !current.iter().skip(1).any(|c| c.name == *name) {
+                anyhow::bail!("there is no extra camera called {name}");
+            }
+        }
+        CamerasCommand::Apply => {}
+    }
+    let in_use = opal_ipc::request("cameras", Duration::from_secs(3)).is_ok_and(|l| {
+        l.split(" | ")
+            .any(|c| c.split(' ').nth(2).is_some_and(|apps| apps != "-"))
+    });
+    let released = !in_use && opal_ipc::request("cameras release", Duration::from_secs(3)).is_ok();
+    let exe = std::env::current_exe()?.display().to_string();
+    let mut args = vec![exe, "cameras".into(), verb.into()];
+    args.extend(name.cloned());
+    let status = uninstall::as_admin(&args).status();
+    if released {
+        let _ = opal_ipc::request("cameras open", Duration::from_secs(3));
+    }
+    // pkexec's own codes (126: no password given) pass through for the control panel.
+    Ok(match status?.code() {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(code.clamp(1, 255) as u8),
+        None => ExitCode::FAILURE,
+    })
+}
+
+#[cfg(windows)]
+fn camera_command(_: Option<CamerasCommand>) -> Result<ExitCode> {
+    println!("Windows shares a camera between apps itself, so there is one camera, Opal C1 Virtual.");
+    Ok(ExitCode::SUCCESS)
 }

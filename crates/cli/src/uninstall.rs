@@ -98,9 +98,15 @@ fn plan(keep_data: bool) -> Vec<Step> {
             .filter(|(path, text)| std::fs::read_to_string(path).is_ok_and(|t| t.trim() == text.trim()))
             .map(|(path, _)| path.to_string())
             .collect();
-        if !ours.is_empty() {
+        // Extra virtual cameras from `opal-rs cameras` (the package's purge removes them itself).
+        let cameras = std::fs::read_to_string(crate::cameras::CONF)
+            .is_ok_and(|t| t.starts_with(crate::cameras::MARK) && !packaged);
+        if !ours.is_empty() || cameras {
             let mut rm = vec!["rm".to_owned(), "-f".to_owned()];
             rm.extend(ours);
+            if cameras {
+                rm.push(crate::cameras::CONF.into());
+            }
             steps.push(Step::Admin(rm));
             steps.push(Step::Admin(
                 ["udevadm", "control", "--reload-rules"].map(String::from).into(),
@@ -171,17 +177,23 @@ fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// `command` to run as administrator: through sudo in a terminal; without one, pkexec asks through the desktop.
+pub fn as_admin(command: &[String]) -> Command {
+    use std::io::IsTerminal;
+    let mut c = Command::new(if cfg!(unix) && std::io::stdin().is_terminal() {
+        "sudo"
+    } else {
+        "pkexec"
+    });
+    c.args(command);
+    c
+}
+
+/// Runs `command`, as administrator if `admin` (Linux; on Windows the installer asks for that itself). True if it
+/// succeeded.
 fn run(command: &[String], admin: bool) -> std::io::Result<bool> {
     let mut c = if admin && cfg!(unix) {
-        // sudo asks in the terminal; without one, pkexec asks through the desktop.
-        use std::io::IsTerminal;
-        let mut c = Command::new(if std::io::stdin().is_terminal() {
-            "sudo"
-        } else {
-            "pkexec"
-        });
-        c.args(command);
-        c
+        as_admin(command)
     } else {
         let mut c = Command::new(&command[0]);
         c.args(&command[1..]);

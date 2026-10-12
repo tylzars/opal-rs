@@ -31,6 +31,8 @@ const LOW_POWER_START: Duration = Duration::from_secs(3);
 /// Shortest time from a stop to the next start.
 const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
+/// How often cameras that appeared or went away (see `cameras`) are picked up.
+const REFRESH_PERIOD: Duration = Duration::from_secs(2);
 /// How often the control socket is checked while waiting out `POLL`.
 const ACCEPT_POLL: Duration = Duration::from_millis(10);
 const TEMPERATURE_PERIOD: Duration = Duration::from_secs(5);
@@ -243,6 +245,8 @@ struct Session {
     /// Average chip temperature in degrees C.
     temperature: Mutex<Option<f32>>,
     last_frame: Mutex<Vec<u8>>,
+    /// Where the video goes; none in low power mode or without an output.
+    outputs: Mutex<Option<crate::output::Outputs>>,
     alive: AtomicBool,
 }
 
@@ -680,6 +684,19 @@ impl Session {
                 }
                 Ok(String::new())
             }
+            ["cameras"] => Ok(crate::output::describe(self.outputs.lock().unwrap().as_ref())),
+            ["cameras", "release"] => {
+                if let Some(o) = self.outputs.lock().unwrap().as_mut() {
+                    o.release();
+                }
+                Ok(String::new())
+            }
+            ["cameras", "open"] => {
+                if let Some(o) = self.outputs.lock().unwrap().as_mut() {
+                    o.reopen();
+                }
+                Ok(String::new())
+            }
             ["settings"] => Ok(self.settings.lock().unwrap().commands().collect::<Vec<_>>().join("; ")),
             ["preset", "list"] => {
                 let dir = self.settings.lock().unwrap().preset_dir();
@@ -1048,8 +1065,8 @@ pub fn run(
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     // In low power mode apps use the camera itself, not the virtual camera.
-    let (mut out, mut watch) = match crate::output::open(output.filter(|_| !low_power), vw as usize, vh as usize)? {
-        Some((o, w)) => (Some(o), Some(w)),
+    let (outputs, _registration) = match crate::output::open(output.filter(|_| !low_power), vw as usize, vh as usize)? {
+        Some((o, r)) => (Some(o), Some(r)),
         None => (None, None),
     };
 
@@ -1071,7 +1088,7 @@ pub fn run(
         low_power,
         camera_node: Mutex::new(None),
         resolution,
-        has_output: out.is_some(),
+        has_output: outputs.is_some(),
         state: Mutex::new(State {
             mode: Mode::Auto,
             streaming: false,
@@ -1119,6 +1136,7 @@ pub fn run(
         frames: AtomicU64::new(0),
         temperature: Mutex::new(None),
         last_frame: Mutex::new(Vec::new()),
+        outputs: Mutex::new(outputs),
         alive: AtomicBool::new(true),
     });
     session.link.write(session.led, &Led::Off.packet())?;
@@ -1256,7 +1274,7 @@ pub fn run(
                         opal_effects::fade(&mut frame, &placard, off_level);
                     }
                 }
-                if let Some(out) = &mut out
+                if let Some(out) = session.outputs.lock().unwrap().as_mut()
                     && let Err(e) = out.write(&frame)
                 {
                     eprintln!("output: {e}");
@@ -1455,6 +1473,7 @@ pub fn run(
     };
     let screen_lock = crate::platform::ScreenLock::new();
     let mut last_lock = Instant::now() - LOCK_PERIOD;
+    let mut last_refresh = Instant::now();
     while !crate::stopped() && !RESTART.load(Ordering::Relaxed) {
         // A camera that stopped answering is kept until video is wanted (see `update`).
         if !session.alive.load(Ordering::Relaxed) && !session.frozen.load(Ordering::Relaxed) {
@@ -1475,9 +1494,21 @@ pub fn run(
         let users = if low_power {
             Some(crate::output::low_power_users(&mut session.camera_node.lock().unwrap()))
         } else {
-            watch.as_mut().map(|w| {
-                let names = w.users();
-                (names.len(), names)
+            if last_refresh.elapsed() >= REFRESH_PERIOD {
+                last_refresh = Instant::now();
+                if let Some(o) = session.outputs.lock().unwrap().as_mut() {
+                    o.refresh();
+                }
+            }
+            // Scanned without holding the outputs, which the frame thread needs.
+            let paths = session.outputs.lock().unwrap().as_ref().map(|o| o.watch_paths());
+            paths.and_then(|paths| {
+                let found = crate::output::scan_users(&paths);
+                let mut outputs = session.outputs.lock().unwrap();
+                let o = outputs.as_mut()?;
+                o.set_users(&paths, found);
+                let names = o.users();
+                Some((names.len(), names))
             })
         };
         // The control panel takes its preview from here rather than from the output, which v4l2loopback lets

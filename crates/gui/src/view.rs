@@ -127,6 +127,8 @@ pub struct State {
     new_picture: String,
     /// The record button is held down.
     loop_holding: bool,
+    #[cfg(unix)]
+    cameras: crate::cameras::Card,
     loop_bounce: bool,
 }
 
@@ -172,6 +174,8 @@ impl State {
             new_colour: "white".into(),
             new_picture: String::new(),
             loop_holding: false,
+            #[cfg(unix)]
+            cameras: Default::default(),
             loop_bounce: false,
         }
     }
@@ -810,6 +814,15 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     }
     if v.more {
         manual(app, ui, cmds);
+    }
+
+    #[cfg(unix)]
+    {
+        group(ui, "Virtual cameras");
+        let reply = app.lists.lock().unwrap().cameras.clone();
+        if app.view.cameras.show(ui, &reply) {
+            app.lists.lock().unwrap().stale = true;
+        }
     }
 
     let c = &mut app.c;
