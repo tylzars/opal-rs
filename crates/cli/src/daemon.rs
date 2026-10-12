@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use opal_c1::Led;
+use opal_c1::faces::{self, Tracker};
 use opal_dai::device::Device;
 use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
-use opal_effects::{BackgroundBlur, Cube, Mask, YuvLut};
+use opal_effects::{BackgroundBlur, Cube, Framing, Mask, Speed, YuvLut, crop_scale};
 use opal_xlink::{Link, StreamId};
 
 use crate::settings::Settings;
@@ -84,16 +85,26 @@ fn load_look(path: &Path, amount: f32) -> Result<Look> {
     })
 }
 
+/// Auto framing: follows a face with a crop.
+struct Zoom {
+    enabled: bool,
+    framing: Framing,
+    tracker: Tracker,
+    faces: u64,
+}
+
 struct Session {
     link: Arc<Link>,
     control: StreamId,
     mic: StreamId,
     led: StreamId,
     seg_ctrl: StreamId,
+    face_ctrl: StreamId,
     output: Option<PathBuf>,
     state: Mutex<State>,
     blur: Mutex<Blur>,
     look: Mutex<Option<Look>>,
+    zoom: Mutex<Zoom>,
     settings: Mutex<Settings>,
     frames: AtomicU64,
     last_frame: Mutex<Vec<u8>>,
@@ -161,8 +172,14 @@ impl Session {
                 let look = look
                     .as_ref()
                     .map_or("none".into(), |l| format!("{} {:.2}", l.name, l.amount));
+                let zoom = self.zoom.lock().unwrap();
+                let zoom = if zoom.enabled {
+                    format!("{:.2} faces {}", zoom.framing.amount, zoom.faces)
+                } else {
+                    "off".into()
+                };
                 Ok(format!(
-                    "mode {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {}",
+                    "mode {} streaming {} consumers {} frames {} blur {} masks {} person {:.2} lut {} zoom {}",
                     format!("{:?}", st.mode).to_lowercase(),
                     st.streaming,
                     st.consumers,
@@ -171,7 +188,36 @@ impl Session {
                     blur.masks,
                     person,
                     look,
+                    zoom,
                 ))
+            }
+            ["zoom", amount] => {
+                let amount: Option<f32> = match *amount {
+                    "off" => None,
+                    "on" => Some(0.5),
+                    a => Some(a.parse::<f32>()?.clamp(0.0, 1.0)),
+                };
+                let mut zoom = self.zoom.lock().unwrap();
+                if amount.is_some() != zoom.enabled {
+                    let config = NnConfig {
+                        process_inputs: amount.is_some(),
+                    };
+                    self.link.write(self.face_ctrl, &config.to_packet())?;
+                }
+                zoom.enabled = amount.is_some();
+                if let Some(a) = amount {
+                    zoom.framing.amount = a;
+                }
+                Ok(String::new())
+            }
+            ["tracking", speed] => {
+                self.zoom.lock().unwrap().framing.speed = match *speed {
+                    "slow" => Speed::Slow,
+                    "normal" => Speed::Normal,
+                    "fast" => Speed::Fast,
+                    _ => bail!("tracking slow, normal or fast"),
+                };
+                Ok(String::new())
             }
             ["lut", "off"] => {
                 *self.look.lock().unwrap() = None;
@@ -365,6 +411,7 @@ pub fn run(
         mic: streams[opal_c1::MIC_STREAM],
         led: streams[opal_c1::LED_STREAM],
         seg_ctrl: streams[opal_c1::SEGMENTATION_CONTROL_STREAM],
+        face_ctrl: streams[opal_c1::FACE_CONTROL_STREAM],
         output: output.clone(),
         state: Mutex::new(State {
             mode: Mode::Auto,
@@ -375,6 +422,12 @@ pub fn run(
         }),
         blur: Mutex::new(Blur::default()),
         look: Mutex::new(None),
+        zoom: Mutex::new(Zoom {
+            enabled: false,
+            framing: Framing::new(opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize),
+            tracker: Tracker::default(),
+            faces: 0,
+        }),
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
         last_frame: Mutex::new(Vec::new()),
@@ -386,6 +439,7 @@ pub fn run(
     session.link.write(session.led, &Led::White.packet())?;
     let pause = NnConfig { process_inputs: false };
     session.link.write(session.seg_ctrl, &pause.to_packet())?;
+    session.link.write(session.face_ctrl, &pause.to_packet())?;
     let saved: Vec<String> = session.settings.lock().unwrap().commands().map(str::to_owned).collect();
     for c in saved.iter().chain(overrides) {
         if let Err(e) = session.run_command(c) {
@@ -399,6 +453,7 @@ pub fn run(
             let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
             let mut effects = BackgroundBlur::new(w, h);
             let mut frame = Vec::new();
+            let mut zoomed = Vec::new();
             while let Ok(packet) = session.link.read(opal_c1::VIDEO_STREAM, None) {
                 let Some((data, IMG_FRAME, _)) = message::split(&packet) else {
                     continue;
@@ -415,6 +470,16 @@ pub fn run(
                 };
                 if let (r @ 1.., Some(mask), true) = (radius, &mask, frame.len() >= w * h * 3 / 2) {
                     effects.apply(&mut frame, mask, r);
+                }
+                let crop = {
+                    let mut zoom = session.zoom.lock().unwrap();
+                    let crop = zoom.framing.step();
+                    (zoom.enabled && !zoom.framing.is_full()).then_some(crop)
+                };
+                if let (Some(crop), true) = (crop, frame.len() >= w * h * 3 / 2) {
+                    zoomed.resize(frame.len(), 0);
+                    crop_scale(&frame, &mut zoomed, w, h, crop);
+                    std::mem::swap(&mut frame, &mut zoomed);
                 }
                 if let Some(out) = &mut out
                     && let Err(e) = out.write(&frame)
@@ -457,6 +522,24 @@ pub fn run(
                 match &mut blur.mask {
                     Some(m) => m.follow(&next, MASK_FOLLOW),
                     None => blur.mask = Some(next),
+                }
+            }
+        });
+    }
+
+    {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            while let Ok(packet) = session.link.read(opal_c1::FACE_STREAM, None) {
+                let Some((nn, data)) = NnData::parse(&packet) else {
+                    continue;
+                };
+                let found = faces::decode(&nn, data);
+                let mut zoom = session.zoom.lock().unwrap();
+                zoom.faces += 1;
+                if let Some(face) = zoom.tracker.update(&found) {
+                    let (cx, cy) = face.center();
+                    zoom.framing.face(cx, cy, face.height());
                 }
             }
         });

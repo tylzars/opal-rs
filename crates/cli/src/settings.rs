@@ -38,6 +38,8 @@ fn group(command: &str) -> Option<&'static str> {
         "gain" => "gain",
         "blur" => "blur",
         "lut" => "lut",
+        "zoom" => "zoom",
+        "tracking" => "tracking",
         _ => return None,
     })
 }

@@ -6,7 +6,7 @@ use std::thread;
 use crate::device::{Device, Error, STREAM_SIZE};
 use crate::message::{AudioInConfig, CameraControl};
 use crate::msgpack::{self, Value};
-use crate::nop;
+use crate::nop::{self, EmptyArray};
 use crate::{mp_map, nop_struct};
 
 const ASSET_STREAM: &str = "__stream_asset_storage";
@@ -242,6 +242,220 @@ nop_struct!(Script {
     processor
 });
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Point2f {
+    x: f32,
+    y: f32,
+}
+nop_struct!(Point2f { x, y });
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Size2f {
+    width: f32,
+    height: f32,
+}
+nop_struct!(Size2f { width, height });
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RotatedRect {
+    center: Point2f,
+    size: Size2f,
+    angle: f32,
+}
+nop_struct!(RotatedRect { center, size, angle });
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CropRect {
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+}
+nop_struct!(CropRect { xmin, ymin, xmax, ymax });
+
+#[derive(Clone, Debug, PartialEq)]
+struct CropConfig {
+    crop_rect: CropRect,
+    crop_rotated_rect: RotatedRect,
+    enable_center_crop_rectangle: bool,
+    crop_ratio: f32,
+    width_height_aspect_ratio: f32,
+    enable_rotated_rect: bool,
+    normalized_coords: bool,
+}
+nop_struct!(CropConfig {
+    crop_rect,
+    crop_rotated_rect,
+    enable_center_crop_rectangle,
+    crop_ratio,
+    width_height_aspect_ratio,
+    enable_rotated_rect,
+    normalized_coords
+});
+
+impl Default for CropConfig {
+    fn default() -> Self {
+        Self {
+            crop_rect: CropRect::default(),
+            crop_rotated_rect: RotatedRect::default(),
+            enable_center_crop_rectangle: false,
+            crop_ratio: 1.0,
+            width_height_aspect_ratio: 1.0,
+            enable_rotated_rect: false,
+            normalized_coords: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResizeConfig {
+    width: i32,
+    height: i32,
+    lock_aspect_ratio_fill: bool,
+    bg_red: u8,
+    bg_green: u8,
+    bg_blue: u8,
+    warp_four_points: EmptyArray,
+    normalized_coords: bool,
+    enable_warp_4pt: bool,
+    warp_matrix_3x3: EmptyArray,
+    enable_warp_matrix: bool,
+    warp_border_replicate: bool,
+    rotation_angle_deg: f32,
+    enable_rotation: bool,
+    keep_aspect_ratio: bool,
+}
+nop_struct!(ResizeConfig {
+    width,
+    height,
+    lock_aspect_ratio_fill,
+    bg_red,
+    bg_green,
+    bg_blue,
+    warp_four_points,
+    normalized_coords,
+    enable_warp_4pt,
+    warp_matrix_3x3,
+    enable_warp_matrix,
+    warp_border_replicate,
+    rotation_angle_deg,
+    enable_rotation,
+    keep_aspect_ratio
+});
+
+impl Default for ResizeConfig {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            lock_aspect_ratio_fill: false,
+            bg_red: 0,
+            bg_green: 0,
+            bg_blue: 0,
+            warp_four_points: EmptyArray,
+            normalized_coords: true,
+            enable_warp_4pt: false,
+            warp_matrix_3x3: EmptyArray,
+            enable_warp_matrix: false,
+            warp_border_replicate: false,
+            rotation_angle_deg: 0.0,
+            enable_rotation: false,
+            keep_aspect_ratio: true,
+        }
+    }
+}
+
+/// Frame type that keeps the input's type.
+const FRAME_TYPE_NONE: i32 = 32;
+
+#[derive(Clone, Debug, PartialEq)]
+struct FormatConfig {
+    frame_type: i32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+}
+nop_struct!(FormatConfig {
+    frame_type,
+    flip_horizontal,
+    flip_vertical
+});
+
+impl Default for FormatConfig {
+    fn default() -> Self {
+        Self {
+            frame_type: FRAME_TYPE_NONE,
+            flip_horizontal: false,
+            flip_vertical: false,
+        }
+    }
+}
+
+/// What an ImageManip node does to each frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImageManipConfig {
+    crop: CropConfig,
+    resize: ResizeConfig,
+    format: FormatConfig,
+    enable_crop: bool,
+    enable_resize: bool,
+    enable_format: bool,
+    reuse_previous_image: bool,
+    skip_current_image: bool,
+}
+nop_struct!(ImageManipConfig {
+    crop,
+    resize,
+    format,
+    enable_crop,
+    enable_resize,
+    enable_format,
+    reuse_previous_image,
+    skip_current_image
+});
+
+impl ImageManipConfig {
+    /// Resizes to `width` x `height`, letterboxing when `keep_aspect` is set, stretching otherwise.
+    pub fn resize(width: i32, height: i32, keep_aspect: bool) -> Self {
+        let mut c = Self::default();
+        c.resize.width = width;
+        c.resize.height = height;
+        c.resize.keep_aspect_ratio = keep_aspect;
+        c.enable_resize = true;
+        c
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ImageManipProps {
+    initial_config: ImageManipConfig,
+    output_frame_size: i32,
+    num_frames_pool: i32,
+    mesh_width: i32,
+    mesh_height: i32,
+    mesh_uri: String,
+}
+nop_struct!(ImageManipProps {
+    initial_config,
+    output_frame_size,
+    num_frames_pool,
+    mesh_width,
+    mesh_height,
+    mesh_uri
+});
+
+impl Default for ImageManipProps {
+    fn default() -> Self {
+        Self {
+            initial_config: ImageManipConfig::default(),
+            output_frame_size: 1 << 20,
+            num_frames_pool: 4,
+            mesh_width: 0,
+            mesh_height: 0,
+            mesh_uri: String::new(),
+        }
+    }
+}
+
 struct NeuralNetwork {
     blob_size: Option<u32>,
     blob_uri: String,
@@ -415,14 +629,33 @@ impl Pipeline {
         })
     }
 
+    /// Resizes or crops frames. Inputs "inputImage" (dropped when busy) and "inputConfig", output "out".
+    pub fn image_manip(&mut self, config: ImageManipConfig, max_output_size: i32, image_queue: i32) -> NodeId {
+        let props = ImageManipProps {
+            initial_config: config,
+            output_frame_size: max_output_size,
+            ..Default::default()
+        };
+        self.add(Node {
+            name: "ImageManip",
+            properties: nop::to_vec(&props),
+            io: vec![
+                input("inputConfig", true, 8, false),
+                input("inputImage", false, image_queue, true),
+                output("out"),
+            ],
+            assets: vec![],
+        })
+    }
+
     /// Neural network. Inputs "in" (frames, dropped when busy) and "inConfig", outputs "out" and "passthrough".
-    pub fn neural_network(&mut self, blob: Vec<u8>, pool_frames: u32, num_threads: u32) -> NodeId {
+    pub fn neural_network(&mut self, blob: Vec<u8>, pool_frames: u32, num_threads: u32, nce_per_thread: u32) -> NodeId {
         let props = NeuralNetwork {
             blob_size: Some(blob.len() as u32),
             blob_uri: "asset:__blob".into(),
             num_frames: pool_frames,
             num_threads,
-            num_nce_per_thread: 0,
+            num_nce_per_thread: nce_per_thread,
             num_frames_to_skip: 0,
         };
         self.add(Node {
@@ -633,6 +866,22 @@ mod tests {
             gpio_stream_off: BTreeMap::new(),
         };
         assert_eq!(nop::to_vec(&u), hex("b9 03 bb 00 bb 00 bb 00"));
+        assert_eq!(
+            nop::to_vec(&ImageManipProps::default()),
+            hex(
+                "b9 06 b9 08 b9 07 b9 04 88 00 00 00 00 88 00 00 00 00 88 00 00 00 00 88 00 00 00 00 b9 03 b9 02 \
+                 88 00 00 00 00 88 00 00 00 00 b9 02 88 00 00 00 00 88 00 00 00 00 88 00 00 00 00 00 88 00 00 80 \
+                 3f 88 00 00 80 3f 00 01 b9 0f 00 00 00 00 00 00 ba 00 01 00 ba 00 00 00 88 00 00 00 00 00 01 b9 \
+                 03 20 00 00 00 00 00 00 00 86 00 00 10 00 04 00 00 bd 00"
+            )
+        );
+        let resize = nop::to_vec(&ImageManipConfig::resize(300, 300, false));
+        let at = resize.windows(2).position(|w| w == [0xb9, 0x0f]).unwrap();
+        assert_eq!(&resize[at..at + 8], hex("b9 0f 85 2c 01 85 2c 01"));
+        assert_eq!(resize[at + 26], 0, "keep aspect ratio off");
+        let keep = nop::to_vec(&ImageManipConfig::resize(256, 144, true));
+        let at = keep.windows(2).position(|w| w == [0xb9, 0x0f]).unwrap();
+        assert_eq!(keep[at + 26], 1);
         let nn = NeuralNetwork {
             blob_size: Some(1_000_000),
             blob_uri: "asset:__blob".into(),

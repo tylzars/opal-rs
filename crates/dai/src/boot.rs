@@ -28,11 +28,31 @@ pub enum Step {
 }
 
 /// Boots `firmware` with `config` and returns the device once it is running.
+///
+/// If the bootloader drops away mid-boot (it times out and starts the application in flash), the camera is taken
+/// again once, so it is not left cycling between the two.
 pub fn boot(
     device: &Found,
     config: &BoardConfig,
     firmware: &[u8],
     mut on_step: impl FnMut(Step),
+) -> Result<Found, Error> {
+    let first = match boot_once(device, config, firmware, &mut on_step) {
+        Ok(f) => return Ok(f),
+        Err(e) => e,
+    };
+    let serial = device.serial().unwrap_or_default().to_owned();
+    let again = bootloader::wait_for(&serial, State::Bootloader, Duration::from_secs(15))
+        .or_else(|| bootloader::wait_for(&serial, State::FlashBooted, Duration::from_secs(1)))
+        .ok_or(first)?;
+    boot_once(&again, config, firmware, &mut on_step)
+}
+
+fn boot_once(
+    device: &Found,
+    config: &BoardConfig,
+    firmware: &[u8],
+    on_step: &mut impl FnMut(Step),
 ) -> Result<Found, Error> {
     let serial = device.serial().unwrap_or_default().to_owned();
     let device = match device.state {
@@ -47,7 +67,15 @@ pub fn boot(
         State::Unbooted => return Err(Error::Missing(State::Bootloader)),
     };
 
-    let bl = Bootloader::connect(&device.info)?;
+    // Right after the bootloader appears, udev may not have given us access yet.
+    let started = std::time::Instant::now();
+    let bl = loop {
+        match Bootloader::connect(&device.info) {
+            Ok(bl) => break bl,
+            Err(_) if started.elapsed() < Duration::from_secs(3) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(e.into()),
+        }
+    };
     let version = bl.version()?;
     if version < MIN_BOOTLOADER {
         drop(bl);

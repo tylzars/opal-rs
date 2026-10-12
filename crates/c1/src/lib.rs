@@ -2,8 +2,10 @@
 
 use std::path::Path;
 
+pub mod faces;
+
 use opal_dai::message::{AudioInConfig, CameraControl, af, antibanding, awb, control, scene};
-use opal_dai::pipeline::{AudioMic, ColorCamera, IspScale, Pipeline, orientation, resolution};
+use opal_dai::pipeline::{AudioMic, ColorCamera, ImageManipConfig, IspScale, Pipeline, orientation, resolution};
 
 pub const CONTROL_STREAM: &str = "control";
 pub const MIC_STREAM: &str = "micCfg";
@@ -22,6 +24,16 @@ pub const SEGMENTATION_CONTROL_STREAM: &str = "ctrlSegmenter";
 pub const SEGMENTATION_WIDTH: u32 = 256;
 pub const SEGMENTATION_HEIGHT: u32 = 144;
 const SEGMENTATION_BLOB: &str = "49559974de.tlv";
+
+/// Face detections, SSD rows of [image, label, confidence, x0, y0, x1, y1] in `detection_out`.
+pub const FACE_STREAM: &str = "face_detection";
+/// NN config messages that pause or resume face detection.
+pub const FACE_CONTROL_STREAM: &str = "ctrlFace";
+const FACE_BLOB: &str = "dd0bad95b2.tlv";
+const FACE_INPUT: i32 = 300;
+
+const PREVIEW_WIDTH: u32 = SEGMENTATION_WIDTH;
+const PREVIEW_HEIGHT: u32 = SEGMENTATION_HEIGHT;
 
 /// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
 const LED_SCRIPT: &str = r#"
@@ -97,7 +109,7 @@ pub fn stop_control() -> CameraControl {
     c
 }
 
-/// Camera video and person segmentation to the host over XLink, microphone into UAC, with control streams.
+/// Camera video, person segmentation and face detection to the host over XLink, microphone into UAC, with control streams.
 pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     let mut p = Pipeline::default();
     let mut init = CameraControl::default();
@@ -114,8 +126,8 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
         board_socket: 0,
         image_orientation: orientation::ROTATE_180,
         interleaved: false,
-        preview_width: SEGMENTATION_WIDTH,
-        preview_height: SEGMENTATION_HEIGHT,
+        preview_width: PREVIEW_WIDTH,
+        preview_height: PREVIEW_HEIGHT,
         video_width: VIDEO_WIDTH as i32,
         video_height: VIDEO_HEIGHT as i32,
         resolution: resolution::K4,
@@ -134,12 +146,25 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     let video = p.xlink_out(VIDEO_STREAM, false, 3, -1.0);
     p.link(cam, "video", video, "in");
 
-    let seg = p.neural_network(std::fs::read(asset_dir.join(SEGMENTATION_BLOB))?, 2, 2);
+    let seg = p.neural_network(std::fs::read(asset_dir.join(SEGMENTATION_BLOB))?, 2, 2, 0);
     p.link(cam, "preview", seg, "in");
     let seg_out = p.xlink_out(SEGMENTATION_STREAM, false, 1, 30.0);
     p.link(seg, "out", seg_out, "in");
     let seg_ctrl = p.xlink_in(SEGMENTATION_CONTROL_STREAM, 256);
     p.link(seg_ctrl, "out", seg, "inConfig");
+
+    let face_size = p.image_manip(
+        ImageManipConfig::resize(FACE_INPUT, FACE_INPUT, false),
+        FACE_INPUT * FACE_INPUT * 3,
+        4,
+    );
+    p.link(cam, "preview", face_size, "inputImage");
+    let face = p.neural_network(std::fs::read(asset_dir.join(FACE_BLOB))?, 2, 1, 1);
+    p.link(face_size, "out", face, "in");
+    let face_out = p.xlink_out(FACE_STREAM, false, 1, 30.0);
+    p.link(face, "out", face_out, "in");
+    let face_ctrl = p.xlink_in(FACE_CONTROL_STREAM, 256);
+    p.link(face_ctrl, "out", face, "inConfig");
     let ctrl = p.xlink_in(CONTROL_STREAM, 1024);
     p.link(ctrl, "out", cam, "inputControl");
     let config = p.xlink_in(CONFIG_STREAM, 256);

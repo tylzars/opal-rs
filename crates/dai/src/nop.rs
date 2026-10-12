@@ -290,6 +290,23 @@ impl<T: Nop, const N: usize> Nop for [T; N] {
     }
 }
 
+/// An array that is always empty, for fields that are never used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EmptyArray;
+
+impl Nop for EmptyArray {
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&[ARRAY, 0]);
+    }
+    fn decode(r: &mut Reader<'_>) -> Result<Self, Error> {
+        r.expect(ARRAY)?;
+        match r.len()? {
+            0 => Ok(EmptyArray),
+            _ => Err(Error::Range),
+        }
+    }
+}
+
 impl<T: Nop> Nop for Option<T> {
     fn encode(&self, out: &mut Vec<u8>) {
         match self {
