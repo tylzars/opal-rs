@@ -17,15 +17,15 @@ install says this kernel has none, also install `v4l2loopback-dkms`; on a comput
 to set a password and confirm it once after a restart (MOK enrollment). If the install says v4l2loopback was already
 loaded with other settings, restart the computer.
 
-Then log out and back in: the service and the tray icon start on their own. Open "Opal C1" from the app menu for the
-control panel. To remove it, see [Uninstalling](#uninstalling).
+Then log out and back in: the service and the tray icon start on their own. Open "Opal C1 Control" from the app menu
+for the control panel. To remove it, see [Uninstalling](#uninstalling).
 
 Other Linux distributions: build from source, below.
 
 ### Windows 11 (not yet tried on a real machine)
 Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the
-"Opal C1 Virtual" camera, starts the tray icon when you sign in, adds "Opal C1" to the Start menu and offers to start
-it right away. To remove it, see [Uninstalling](#uninstalling).
+"Opal C1 Virtual" camera, starts the tray icon when you sign in, adds "Opal C1 Control" to the Start menu and offers
+to start it right away. To remove it, see [Uninstalling](#uninstalling).
 
 ## Uninstalling
 ```shell

@@ -61,7 +61,7 @@ fn install_dir() -> PathBuf {
 fn shortcut() -> PathBuf {
     std::env::var_os("ProgramData")
         .map_or_else(|| PathBuf::from("C:\\ProgramData"), PathBuf::from)
-        .join("Microsoft\\Windows\\Start Menu\\Programs\\Opal C1.lnk")
+        .join("Microsoft\\Windows\\Start Menu\\Programs\\Opal C1 Control.lnk")
 }
 
 pub fn main() {

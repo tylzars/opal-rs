@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Opal C1
+Name=Opal C1 Control
 Comment=Control panel for the Opal C1 camera
 Exec=opal-rs-gui
 Icon=camera-web

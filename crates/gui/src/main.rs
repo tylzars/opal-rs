@@ -436,7 +436,7 @@ fn main() -> eframe::Result {
     let debug = std::env::args().any(|a| a == "--debug");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Opal C1")
+            .with_title("Opal C1 Control")
             .with_inner_size([600.0, 900.0])
             .with_min_inner_size([480.0, 420.0]),
         ..Default::default()
