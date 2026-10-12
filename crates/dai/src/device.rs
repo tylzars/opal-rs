@@ -87,12 +87,24 @@ nop_struct!(LogMessage {
 
 pub const LOG_WARN: i32 = 3;
 
+#[cfg(unix)]
 fn monotonic() -> Timestamp {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     Timestamp {
         sec: ts.tv_sec,
         nsec: ts.tv_nsec,
+    }
+}
+
+/// A steady clock from when it was first read; the camera only needs it to move forward evenly.
+#[cfg(not(unix))]
+fn monotonic() -> Timestamp {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let t = START.get_or_init(std::time::Instant::now).elapsed();
+    Timestamp {
+        sec: t.as_secs() as i64,
+        nsec: t.subsec_nanos() as i64,
     }
 }
 

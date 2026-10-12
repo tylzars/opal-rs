@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -86,6 +86,56 @@ struct Shared {
     /// Header and payload for the writer thread. The reader must never wait on USB writes, or the device can stall
     /// sending to us while we stall sending to it.
     out: mpsc::Sender<([u8; HEADER_LEN], Vec<u8>)>,
+    started: Instant,
+    /// When the device last sent anything, in milliseconds after `started`.
+    last_heard: AtomicU64,
+    /// The last packet headers each way, for working out why a device went quiet.
+    trace: Mutex<VecDeque<String>>,
+}
+
+const TRACE_LEN: usize = 16;
+
+fn note(shared: &Shared, dir: &str, h: &Header) {
+    let kind = match h.kind % RESP {
+        WRITE_REQ => "write",
+        READ_REL_REQ => "release",
+        CREATE_STREAM_REQ => "create",
+        CLOSE_STREAM_REQ => "close",
+        PING_REQ => "ping",
+        RESET_REQ => "reset",
+        _ => "other",
+    };
+    let line = format!(
+        "{:.3} {dir} {kind}{} stream {} size {}",
+        shared.started.elapsed().as_secs_f64(),
+        if h.kind >= RESP { " reply" } else { "" },
+        h.stream,
+        h.size
+    );
+    let mut t = shared.trace.lock().unwrap();
+    if t.len() == TRACE_LEN {
+        t.pop_front();
+    }
+    t.push_back(line);
+}
+
+/// Recent packets each way and how full each stream is.
+fn dump(shared: &Shared) -> String {
+    let mut out: Vec<String> = shared.trace.lock().unwrap().iter().cloned().collect();
+    let st = shared.state.lock().unwrap();
+    let mut ids: Vec<_> = st.streams.keys().copied().collect();
+    ids.sort();
+    for id in ids {
+        let s = &st.streams[&id];
+        out.push(format!(
+            "stream {id} {}: sent {} packets {} bytes not released, {} unread",
+            s.name,
+            s.remote_packets,
+            s.remote_fill,
+            s.incoming.len()
+        ));
+    }
+    out.join("\n")
 }
 
 fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; HEADER_LEN], Vec<u8>)>) {
@@ -95,6 +145,7 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
             Err(mpsc::RecvTimeoutError::Timeout) if shared.state.lock().unwrap().closed.is_none() => continue,
             Err(_) => break,
         };
+        note(&shared, "out", &Header::decode(&header));
         let result = writer.write_all(&header).and_then(|_| {
             if payload.is_empty() {
                 Ok(())
@@ -111,6 +162,9 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
         }
     }
 }
+
+/// How long the reader waits for the device before queueing its reads again.
+const QUIET_STEP: Duration = Duration::from_secs(5);
 
 static NEXT_ID: AtomicI32 = AtomicI32::new(0xa);
 
@@ -148,6 +202,9 @@ impl Link {
             state: Mutex::new(State::default()),
             cond: Condvar::new(),
             out: tx,
+            started: Instant::now(),
+            last_heard: AtomicU64::new(0),
+            trace: Mutex::new(VecDeque::new()),
         });
         let s = shared.clone();
         thread::Builder::new()
@@ -288,6 +345,22 @@ impl Link {
         Ok(packet)
     }
 
+    /// Time since the device last sent anything.
+    pub fn quiet_for(&self) -> Duration {
+        let heard = Duration::from_millis(self.shared.last_heard.load(Ordering::Relaxed));
+        self.shared.started.elapsed().saturating_sub(heard)
+    }
+
+    /// Ends the link from this side, for a device that stopped answering. Everything waiting on it returns.
+    pub fn close(&self, why: &str) {
+        let mut st = self.shared.state.lock().unwrap();
+        if st.closed.is_none() {
+            st.closed = Some(why.into());
+        }
+        drop(st);
+        self.shared.cond.notify_all();
+    }
+
     /// Waits until the reader sees the link go down.
     pub fn wait_closed(&self, timeout: Duration) -> bool {
         let deadline = Some(Instant::now() + timeout);
@@ -363,11 +436,44 @@ fn reply(shared: &Shared, req: &Header, stream: u32, size: u32, name: &str, flag
 }
 
 fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
+    // Seconds of silence so far, counted in steps of QUIET_STEP.
+    let mut quiet = 0;
     let why = loop {
-        let h = match reader.read_exact(HEADER_LEN, None) {
-            Ok(b) => Header::decode(&b),
+        let h = match reader.read_exact(HEADER_LEN, Some(QUIET_STEP)) {
+            Ok(b) => {
+                if quiet > 0 {
+                    eprintln!("xlink: device heard again after {}s", quiet * QUIET_STEP.as_secs());
+                    quiet = 0;
+                }
+                Header::decode(&b)
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                if shared.state.lock().unwrap().closed.is_some() {
+                    break "closed".into();
+                }
+                // A device that goes quiet may be stuck sending to us: queue fresh reads, then clear the pipe.
+                quiet += 1;
+                if quiet == 2 {
+                    eprintln!("xlink: last packets and stream state:\n{}", dump(&shared));
+                }
+                let cleared = if quiet == 4 { Some(reader.clear_halt()) } else { None };
+                eprintln!(
+                    "xlink: nothing from the device for {}s{}",
+                    quiet * QUIET_STEP.as_secs(),
+                    match cleared {
+                        Some(Ok(())) => ", cleared the receive pipe".to_owned(),
+                        Some(Err(e)) => format!(", clearing the receive pipe failed: {e}"),
+                        None => String::new(),
+                    }
+                );
+                continue;
+            }
             Err(e) => break e.to_string(),
         };
+        shared
+            .last_heard
+            .store(shared.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        note(&shared, "in", &h);
         match h.kind {
             WRITE_REQ => {
                 let data = match reader.read_exact(h.size as usize, None) {
@@ -412,7 +518,7 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
             k => break format!("unexpected event type {k}"),
         }
     };
-    shared.state.lock().unwrap().closed = Some(why);
+    shared.state.lock().unwrap().closed.get_or_insert(why);
     shared.cond.notify_all();
 }
 

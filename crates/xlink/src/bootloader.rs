@@ -32,7 +32,13 @@ pub fn reboot_to_bootloader(info: &nusb::DeviceInfo) -> Result<(), Error> {
         data: &[],
     };
     // The device usually drops off the bus before acknowledging.
+    #[cfg(not(windows))]
     let _ = device.control_out(req, Duration::from_secs(1)).wait();
+    // WinUSB only sends control requests through a claimed interface.
+    #[cfg(windows)]
+    if let Ok(iface) = device.claim_interface(0).wait() {
+        let _ = iface.control_out(req, Duration::from_secs(1)).wait();
+    }
     Ok(())
 }
 
