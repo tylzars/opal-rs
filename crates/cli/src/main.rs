@@ -87,7 +87,7 @@ enum AssetsCommand {
 /// whichever holds the firmware; else the source tree's `assets/` if it exists (where its disk image goes); else the
 /// user's data folder, which installed copies use as they cannot write next to themselves.
 fn asset_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPAL_RS_ASSETS") {
+    if let Some(dir) = std::env::var_os("OPAL_RS_ASSETS").filter(|d| !d.is_empty()) {
         return dir.into();
     }
     let built = ASSET_DIR.map(PathBuf::from);
