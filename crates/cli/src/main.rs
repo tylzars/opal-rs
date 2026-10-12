@@ -113,6 +113,11 @@ fn stopped() -> bool {
     STOP.load(Ordering::Relaxed)
 }
 
+/// True when every camera file is in `dir` and matches the manifest.
+fn assets_ready(dir: &Path) -> bool {
+    opal_assets::verify(dir).is_ok_and(|r| r.iter().all(|(_, s)| matches!(s, Status::Ok)))
+}
+
 fn firmware_asset() -> &'static Asset {
     opal_assets::ASSETS
         .iter()
@@ -316,6 +321,24 @@ fn main() -> Result<ExitCode> {
             on_stop()?;
             let settings_path = settings.unwrap_or_else(settings::default_path);
             let settings = settings::Settings::load(&settings_path);
+            // Checked before the camera is touched: a boot that cannot go on only churns USB.
+            if !assets_ready(&dir) {
+                anyhow::bail!(
+                    "camera files missing in {}: open the control panel, or run `opal-rs assets extract <disk image>`",
+                    dir.display()
+                );
+            }
+            if let Some(path) = output.as_ref().filter(|_| !settings.low_power()) {
+                if !path.exists() {
+                    eprintln!("waiting for {}; is v4l2loopback loaded?", path.display());
+                }
+                while !path.exists() && !stopped() {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                if stopped() {
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
             let mut overrides = Vec::new();
             if let Some(r) = blur {
                 overrides.push(format!("blur {r}"));
