@@ -122,10 +122,10 @@ fn boot_wait() -> Duration {
 }
 
 fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings, overrides: &[String]) -> Result<()> {
-    let booted = boot(dir)?;
+    let low_power = settings.low_power();
+    let booted = boot(dir, low_power)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = sensor_name(&dev)?;
-    let low_power = settings.low_power();
     // Low power mode streams 1080p, as the camera's own USB video has no other size.
     let resolution = if low_power {
         opal_c1::Resolution::P1080
@@ -155,13 +155,14 @@ fn check_boot_interval() -> Result<()> {
     Ok(())
 }
 
-fn boot(dir: &Path) -> Result<opal_xlink::Found> {
+/// Boots the camera. Its own USB video output is only turned on for low power mode.
+fn boot(dir: &Path, usb_video: bool) -> Result<opal_xlink::Found> {
     let device = wait_for_camera(Duration::from_secs(20))?.context("no camera found")?;
     check_boot_interval()?;
     std::fs::write(boot_stamp(), b"")?;
     let firmware = opal_assets::load(dir, firmware_asset())?;
     let config = BoardConfig {
-        uvc_enable: Some(true),
+        uvc_enable: Some(usb_video),
         ..Default::default()
     };
     Ok(opal_dai::boot::boot(&device, &config, &firmware, |step| match step {
@@ -206,12 +207,12 @@ fn main() -> Result<ExitCode> {
             }
         },
         Command::Boot => {
-            let booted = boot(&dir)?;
+            let booted = boot(&dir, false)?;
             println!("{:?} {:04x}", booted.state, booted.state.pid());
             Ok(ExitCode::SUCCESS)
         }
         Command::Info => {
-            let booted = boot(&dir)?;
+            let booted = boot(&dir, false)?;
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             for method in [
                 "getMxId",
