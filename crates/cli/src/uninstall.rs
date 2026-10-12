@@ -82,11 +82,15 @@ fn plan(keep_data: bool) -> Vec<Step> {
         let packaged = Command::new("dpkg-query")
             .args(["-W", "-f=${Status}", "opal-rs"])
             .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("install ok installed"));
+            .is_ok_and(|o| {
+                // Installed, or removed with its configuration (the tray's autostart file) left behind.
+                let status = String::from_utf8_lossy(&o.stdout);
+                status.contains("ok installed") || status.contains("config-files")
+            });
         if packaged {
-            // The package takes its programs and system files with it.
+            // Purged, so the autostart file under /etc goes too; the package takes the rest with it.
             steps.push(Step::Admin(
-                ["apt-get", "remove", "-y", "opal-rs"].map(String::from).into(),
+                ["apt-get", "purge", "-y", "opal-rs"].map(String::from).into(),
             ));
         }
         let ours: Vec<String> = SYSTEM_FILES
@@ -171,7 +175,11 @@ fn run(command: &[String], admin: bool) -> std::io::Result<bool> {
     let mut c = if admin && cfg!(unix) {
         // sudo asks in the terminal; without one, pkexec asks through the desktop.
         use std::io::IsTerminal;
-        let mut c = Command::new(if std::io::stdin().is_terminal() { "sudo" } else { "pkexec" });
+        let mut c = Command::new(if std::io::stdin().is_terminal() {
+            "sudo"
+        } else {
+            "pkexec"
+        });
         c.args(command);
         c
     } else {

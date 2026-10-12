@@ -36,8 +36,8 @@ settings, presets, stickers and the camera files (`--keep-data` keeps them), and
 files. With an administrator password prompt it removes the package, or the system files a source install copied in
 (only exact copies of the ones from `dist/`). `--dry-run` only lists it all.
 
-- `sudo apt remove opal-rs` alone removes the programs and system files but keeps your settings and camera files in
-  `~/.config/opal-rs` and `~/.local/share/opal-rs`. v4l2loopback stays loaded until you restart, and
+- `sudo apt purge opal-rs` alone removes the programs and system files (`apt remove` leaves the tray's autostart
+  file) but keeps your settings and camera files in `~/.config/opal-rs` and `~/.local/share/opal-rs`. v4l2loopback stays loaded until you restart, and
   `sudo apt autoremove` removes `v4l2loopback-dkms` if nothing else uses it.
 - On Windows, Settings > Apps > Installed apps > Opal C1 (opal-rs) > Uninstall does the same and asks whether to
   delete your settings and camera files too.
