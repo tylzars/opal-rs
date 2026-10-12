@@ -142,9 +142,7 @@ impl State {
                 SCENE.map(|rgb| to_color(cube.as_ref().map_or(rgb, |c| c.sample(rgb))))
             })
             .collect();
-        // Windows always has its Open dialog; Linux needs zenity.
-        let can_browse = cfg!(windows)
-            || std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("zenity").is_file()));
+        let can_browse = can_browse();
         Self {
             more: false,
             help: false,
@@ -182,32 +180,7 @@ impl State {
             Pick::Look => ("Choose a look file", "Look files", &["cube"][..]),
             Pick::Sticker => ("Choose a picture", "Pictures", &["png", "jpg", "jpeg"][..]),
         };
-        #[cfg(unix)]
-        let mut command = {
-            let patterns: Vec<String> = extensions
-                .iter()
-                .flat_map(|e| [format!("*.{e}"), format!("*.{}", e.to_uppercase())])
-                .collect();
-            let mut c = Command::new("zenity");
-            c.args(["--file-selection", "--title", title, "--file-filter"])
-                .arg(format!("{kind} | {}", patterns.join(" ")));
-            c
-        };
-        #[cfg(windows)]
-        let mut command = {
-            // The standard Open dialog, through PowerShell; it prints the chosen file.
-            let patterns: Vec<String> = extensions.iter().map(|e| format!("*.{e}")).collect();
-            let script = format!(
-                "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
-                 $d.Title = '{title}'; $d.Filter = '{kind}|{}'; if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}",
-                patterns.join(";")
-            );
-            let mut c = Command::new("powershell");
-            c.args(["-NoProfile", "-STA", "-Command", &script]);
-            // No console window flashing up.
-            std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
-            c
-        };
+        let mut command = file_dialog(title, kind, extensions);
         let (slot, ctx) = (self.picked.clone(), ctx.clone());
         std::thread::spawn(move || {
             let out = command.output();
@@ -222,6 +195,44 @@ impl State {
             }
         });
     }
+}
+
+/// The desktop's Open dialog for one kind of file, as a command that prints the chosen path: zenity on Linux, the
+/// standard dialog through PowerShell on Windows.
+pub fn file_dialog(title: &str, kind: &str, extensions: &[&str]) -> Command {
+    #[cfg(unix)]
+    let command = {
+        let patterns: Vec<String> = extensions
+            .iter()
+            .flat_map(|e| [format!("*.{e}"), format!("*.{}", e.to_uppercase())])
+            .collect();
+        let mut c = Command::new("zenity");
+        c.args(["--file-selection", "--title", title, "--file-filter"])
+            .arg(format!("{kind} | {}", patterns.join(" ")));
+        c
+    };
+    #[cfg(windows)]
+    let command = {
+        // The standard Open dialog, through PowerShell; it prints the chosen file.
+        let patterns: Vec<String> = extensions.iter().map(|e| format!("*.{e}")).collect();
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
+             $d.Title = '{title}'; $d.Filter = '{kind}|{}'; if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}",
+            patterns.join(";")
+        );
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-STA", "-Command", &script]);
+        // No console window flashing up.
+        std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+        c
+    };
+    command
+}
+
+/// Whether a file picker can be shown: always on Windows, with zenity on Linux.
+pub fn can_browse() -> bool {
+    cfg!(windows)
+        || std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("zenity").is_file()))
 }
 
 fn title_case(name: &str) -> String {

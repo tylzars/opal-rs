@@ -86,19 +86,9 @@ fn dot(size: usize, colour: [u8; 3]) -> Vec<(u8, [u8; 3])> {
         .collect()
 }
 
-/// One of the other opal-rs programs: next to this one if it is there, else found on the PATH.
-fn program(name: &str) -> std::path::PathBuf {
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join(&file)))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| file.into())
-}
-
 /// Starts the control panel.
 fn open_panel() {
-    if let Err(e) = std::process::Command::new(program("opal-rs-gui")).spawn() {
+    if let Err(e) = std::process::Command::new(opal_ipc::program("opal-rs-gui")).spawn() {
         eprintln!("opal-rs-gui: {e}");
     }
 }
@@ -224,6 +214,10 @@ fn main() {
 
 #[cfg(unix)]
 fn main() {
+    // A fallback for when the service is not enabled to start on its own.
+    if let Err(e) = opal_ipc::start_service() {
+        eprintln!("opal-rs: {e}");
+    }
     let handle = match Tray::default().spawn() {
         Ok(h) => h,
         Err(e) => {

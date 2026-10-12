@@ -6,27 +6,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, TrayIconBuilder};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage};
 
-use crate::{MODES, Tray, dot, open_panel, program, send};
-
-/// Starts the service without a window, logging to `%LOCALAPPDATA%\opal-rs\service.log`.
-fn start_service() {
-    use std::os::windows::process::CommandExt;
-    let dir = std::env::var_os("LOCALAPPDATA")
-        .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
-        .join("opal-rs");
-    let _ = std::fs::create_dir_all(&dir);
-    let log = std::fs::File::create(dir.join("service.log"));
-    let mut c = std::process::Command::new(program("opal-rs"));
-    c.arg("run").creation_flags(0x0800_0000);
-    if let Ok(log) = log
-        && let Ok(err) = log.try_clone()
-    {
-        c.stdout(log).stderr(err);
-    }
-    if let Err(e) = c.spawn() {
-        eprintln!("opal-rs: {e}");
-    }
-}
+use crate::{MODES, Tray, dot, open_panel, send};
 
 fn icon(colour: [u8; 3]) -> Icon {
     let size = 32;
@@ -38,8 +18,8 @@ fn icon(colour: [u8; 3]) -> Icon {
 }
 
 pub fn run() {
-    if send("status").is_none() {
-        start_service();
+    if let Err(e) = opal_ipc::start_service() {
+        eprintln!("opal-rs: {e}");
     }
     let summary = MenuItem::new("", false, None);
     let video = CheckMenuItem::new("Video on", false, true, None);

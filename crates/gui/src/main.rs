@@ -4,6 +4,7 @@
 mod debug;
 mod overlay;
 mod preview;
+mod setup;
 mod theme;
 mod view;
 
@@ -306,6 +307,8 @@ struct App {
     bins: Option<[u32; overlay::BINS]>,
     /// The newest preview frame as shown, before zebra stripes, for the white picker.
     frame: Option<(Vec<u8>, [usize; 2])>,
+    /// First run: shown instead of the panel until the camera files are in place.
+    setup: setup::Setup,
 }
 
 impl App {
@@ -333,6 +336,7 @@ impl App {
             histogram,
             bins: None,
             frame: None,
+            setup: setup::Setup::new(&cc.egui_ctx),
         }
     }
 
@@ -419,6 +423,9 @@ impl eframe::App for App {
         ui.ctx().request_repaint_after(Duration::from_secs(1));
         if self.debug {
             debug::show(self, ui);
+        } else if self.setup.blocking() {
+            self.setup.show(ui);
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
         } else {
             view::show(self, ui);
         }

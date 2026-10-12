@@ -162,6 +162,50 @@ pub fn request_data(command: &str, timeout: Duration) -> io::Result<(String, Vec
     Ok((words.to_owned(), data))
 }
 
+/// One of the opal-rs programs: next to the running one if it is there, else found on the PATH.
+pub fn program(name: &str) -> PathBuf {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(&file)))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| file.into())
+}
+
+/// Starts the service if it is not running: through systemd on Linux; on Windows without a window, logging to
+/// `%LOCALAPPDATA%\opal-rs\service.log`.
+pub fn start_service() -> io::Result<()> {
+    if request("status", Duration::from_secs(2)).is_ok() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "start", "opal-rs.service"])
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("systemctl --user start opal-rs.service failed"));
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let dir = std::env::var_os("LOCALAPPDATA")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join("opal-rs");
+        std::fs::create_dir_all(&dir)?;
+        let log = std::fs::File::create(dir.join("service.log"))?;
+        let mut c = std::process::Command::new(program("opal-rs"));
+        // No console window.
+        c.arg("run")
+            .creation_flags(0x0800_0000)
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        c.spawn().map(drop)
+    }
+}
+
 /// 128 random bits as hex, from the standard library's randomly keyed hasher.
 #[cfg(not(unix))]
 fn new_token() -> String {
