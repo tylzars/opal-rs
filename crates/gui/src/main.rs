@@ -73,6 +73,7 @@ struct Controls {
     zoom: bool,
     zoom_amount: f32,
     tracking: String,
+    gestures: bool,
     resolution: String,
 }
 
@@ -102,6 +103,7 @@ impl Default for Controls {
             zoom: false,
             zoom_amount: 0.5,
             tracking: "normal".into(),
+            gestures: false,
             resolution: "1080p".into(),
         }
     }
@@ -144,6 +146,7 @@ impl Controls {
                 ["zoom", "on"] => c.zoom = true,
                 ["zoom", a] => (c.zoom, c.zoom_amount) = (true, a.parse().unwrap_or(0.5)),
                 ["tracking", s] => c.tracking = (*s).to_owned(),
+                ["gestures", g] => c.gestures = *g == "on",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
                 _ => {}
             }
@@ -423,6 +426,14 @@ impl App {
             });
         });
 
+        if ui.checkbox(&mut c.gestures, "Hand gestures").changed() {
+            cmds.push(format!("gestures {}", if c.gestures { "on" } else { "off" }));
+        }
+        ui.add_enabled_ui(c.gestures, |ui| {
+            ui.label("Peace sign: video off and on");
+            ui.label("Pinch: follow my face on and off");
+        });
+
         for cmd in cmds {
             self.apply(cmd);
         }
@@ -466,6 +477,13 @@ impl eframe::App for App {
         if self.last_status.elapsed() > Duration::from_secs(1) {
             self.last_status = Instant::now();
             self.status = send("status").unwrap_or_else(|e| e);
+            // A pinch can turn face following on or off from the camera.
+            let mut words = self.status.split_whitespace();
+            if words.any(|w| w == "zoom")
+                && let Some(z) = words.next()
+            {
+                self.c.zoom = z != "off";
+            }
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
 
@@ -479,6 +497,14 @@ impl eframe::App for App {
             ui.label(&self.status);
             if !self.message.is_empty() {
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
+            }
+            if self.status.ends_with("video off") {
+                ui.horizontal(|ui| {
+                    ui.label("Video is off. Make a peace sign to turn it back on, or");
+                    if ui.button("Turn video back on").clicked() {
+                        self.apply("video on".into());
+                    }
+                });
             }
             ui.separator();
             self.preview(ui);

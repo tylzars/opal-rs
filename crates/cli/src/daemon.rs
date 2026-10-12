@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use opal_c1::Led;
-use opal_c1::Resolution;
+use opal_c1::PREVIEW_SIZE;
 use opal_c1::faces::{self, Tracker};
+use opal_c1::hands::{self, Gesture, Gestures, HandBox, View};
+use opal_c1::{Branch, Resolution};
 use opal_dai::device::Device;
 use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
 use opal_effects::{BackgroundBlur, Cube, Framing, Mask, Speed, YuvLut, crop_scale};
@@ -23,6 +25,8 @@ const OFF_DELAY: Duration = Duration::from_secs(2);
 /// The camera takes a few seconds to produce frames after a start, and stopping it before then can bring the
 /// firmware down. So it is only stopped once frames have been coming for this long.
 const STOP_AFTER: Duration = Duration::from_secs(2);
+/// Time a stop needs before the camera can be rebooted.
+const STOP_SETTLE: Duration = Duration::from_secs(3);
 /// Shortest time from a stop to the next start.
 const RESTART_AFTER: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(250);
@@ -144,19 +148,36 @@ struct Zoom {
     faces: u64,
 }
 
+/// Hand gestures: peace turns the video off and on, a pinch turns face framing off and on.
+struct Hands {
+    enabled: bool,
+    /// The box of the landmark crop asked for, while waiting for its result.
+    pending: Option<(HandBox, Instant)>,
+    seen: bool,
+    last: Option<Gesture>,
+    gestures: Gestures,
+}
+
+/// A landmark crop not answered in this time is given up on.
+const CROP_TIMEOUT: Duration = Duration::from_millis(500);
+
 struct Session {
     link: Arc<Link>,
     control: StreamId,
     mic: StreamId,
     led: StreamId,
-    seg_ctrl: StreamId,
-    face_ctrl: StreamId,
+    /// Network and crop control streams of each branch, in `Branch::ALL` order.
+    branches: Vec<(StreamId, StreamId)>,
+    crop_in: StreamId,
     resolution: Resolution,
     output: Option<PathBuf>,
     state: Mutex<State>,
     blur: Mutex<Blur>,
     look: Mutex<Option<Look>>,
     zoom: Mutex<Zoom>,
+    hands: Mutex<Hands>,
+    /// Set by the peace gesture: black frames instead of video.
+    video_off: AtomicBool,
     settings: Mutex<Settings>,
     frames: AtomicU64,
     /// Average chip temperature in degrees C.
@@ -166,6 +187,22 @@ struct Session {
 }
 
 impl Session {
+    /// Pauses or resumes a branch: its crop and its network.
+    fn set_branch(&self, branch: Branch, on: bool) -> Result<()> {
+        let i = Branch::ALL.iter().position(|&b| b == branch).unwrap();
+        let (network, crop) = self.branches[i];
+        if on {
+            self.link.write(crop, &branch.crop(true).to_packet())?;
+            self.link
+                .write(network, &NnConfig { process_inputs: true }.to_packet())?;
+        } else {
+            self.link
+                .write(network, &NnConfig { process_inputs: false }.to_packet())?;
+            self.link.write(crop, &branch.crop(false).to_packet())?;
+        }
+        Ok(())
+    }
+
     fn set_streaming(&self, st: &mut State, on: bool) -> Result<()> {
         if st.streaming == on {
             return Ok(());
@@ -244,7 +281,7 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {}",
+                    "mode {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} video {}",
                     format!("{:?}", st.mode).to_lowercase(),
                     self.resolution.name(),
                     self.temperature
@@ -260,6 +297,22 @@ impl Session {
                     person,
                     look,
                     zoom,
+                    {
+                        let h = self.hands.lock().unwrap();
+                        match (h.enabled, h.seen) {
+                            (false, _) => "off".to_owned(),
+                            (true, seen) => format!(
+                                "on hand {} last {}",
+                                if seen { "yes" } else { "no" },
+                                h.last.map_or("-".into(), |g| format!("{g:?}").to_lowercase()),
+                            ),
+                        }
+                    },
+                    if self.video_off.load(Ordering::Relaxed) {
+                        "off"
+                    } else {
+                        "on"
+                    },
                 ))
             }
             ["zoom", amount] => {
@@ -270,15 +323,28 @@ impl Session {
                 };
                 let mut zoom = self.zoom.lock().unwrap();
                 if amount.is_some() != zoom.enabled {
-                    let config = NnConfig {
-                        process_inputs: amount.is_some(),
-                    };
-                    self.link.write(self.face_ctrl, &config.to_packet())?;
+                    self.set_branch(Branch::Face, amount.is_some())?;
                 }
                 zoom.enabled = amount.is_some();
                 if let Some(a) = amount {
                     zoom.framing.amount = a;
                 }
+                Ok(String::new())
+            }
+            ["gestures", on @ ("on" | "off")] => {
+                let on = *on == "on";
+                let mut h = self.hands.lock().unwrap();
+                if on != h.enabled {
+                    self.set_branch(Branch::Palm, on)?;
+                }
+                (h.enabled, h.seen, h.pending) = (on, false, None);
+                if !on {
+                    self.video_off.store(false, Ordering::Relaxed);
+                }
+                Ok(String::new())
+            }
+            ["video", on @ ("on" | "off")] => {
+                self.video_off.store(*on == "off", Ordering::Relaxed);
                 Ok(String::new())
             }
             ["tracking", speed] => {
@@ -315,8 +381,7 @@ impl Session {
                 let mut blur = self.blur.lock().unwrap();
                 blur.background = None;
                 if blur.radius == 0 {
-                    self.link
-                        .write(self.seg_ctrl, &NnConfig { process_inputs: false }.to_packet())?;
+                    self.set_branch(Branch::Segmentation, false)?;
                     blur.mask = None;
                 }
                 Ok(String::new())
@@ -331,8 +396,7 @@ impl Session {
                     .into_owned();
                 let mut blur = self.blur.lock().unwrap();
                 if blur.radius == 0 && blur.background.is_none() {
-                    self.link
-                        .write(self.seg_ctrl, &NnConfig { process_inputs: true }.to_packet())?;
+                    self.set_branch(Branch::Segmentation, true)?;
                 }
                 blur.background = Some((name, Arc::new(image)));
                 Ok(String::new())
@@ -345,10 +409,7 @@ impl Session {
                 };
                 let mut blur = self.blur.lock().unwrap();
                 if (radius > 0) != (blur.radius > 0) && blur.background.is_none() {
-                    let config = NnConfig {
-                        process_inputs: radius > 0,
-                    };
-                    self.link.write(self.seg_ctrl, &config.to_packet())?;
+                    self.set_branch(Branch::Segmentation, radius > 0)?;
                     if radius == 0 {
                         blur.mask = None;
                     }
@@ -518,8 +579,11 @@ pub fn run(
         control: streams[opal_c1::CONTROL_STREAM],
         mic: streams[opal_c1::MIC_STREAM],
         led: streams[opal_c1::LED_STREAM],
-        seg_ctrl: streams[opal_c1::SEGMENTATION_CONTROL_STREAM],
-        face_ctrl: streams[opal_c1::FACE_CONTROL_STREAM],
+        branches: Branch::ALL
+            .iter()
+            .map(|b| (streams[b.network_control()], streams[b.crop_control()]))
+            .collect(),
+        crop_in: streams[hands::CROP_STREAM],
         resolution,
         output: output.clone(),
         state: Mutex::new(State {
@@ -539,6 +603,14 @@ pub fn run(
             tracker: Tracker::default(),
             faces: 0,
         }),
+        hands: Mutex::new(Hands {
+            enabled: false,
+            pending: None,
+            seen: false,
+            last: None,
+            gestures: Gestures::default(),
+        }),
+        video_off: AtomicBool::new(false),
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
         temperature: Mutex::new(None),
@@ -546,9 +618,9 @@ pub fn run(
         alive: AtomicBool::new(true),
     });
     session.link.write(session.led, &Led::Off.packet())?;
-    let pause = NnConfig { process_inputs: false };
-    session.link.write(session.seg_ctrl, &pause.to_packet())?;
-    session.link.write(session.face_ctrl, &pause.to_packet())?;
+    for b in Branch::ALL {
+        session.set_branch(b, false)?;
+    }
     let saved: Vec<String> = session.settings.lock().unwrap().commands().map(str::to_owned).collect();
     for c in saved.iter().chain(overrides) {
         if let Err(e) = session.run_command(c) {
@@ -596,6 +668,11 @@ pub fn run(
                     zoomed.resize(frame.len(), 0);
                     crop_scale(&frame, &mut zoomed, w, h, crop);
                     std::mem::swap(&mut frame, &mut zoomed);
+                }
+                if session.video_off.load(Ordering::Relaxed) {
+                    frame.fill(0);
+                    let y = w * h;
+                    frame[y..].fill(128);
                 }
                 if let Some(out) = &mut out
                     && let Err(e) = out.write(&frame)
@@ -661,6 +738,95 @@ pub fn run(
         });
     }
 
+    let view = View::new(PREVIEW_SIZE.0, PREVIEW_SIZE.1);
+    {
+        // Palm detections start following a hand when none is followed.
+        let session = session.clone();
+        std::thread::spawn(move || {
+            while let Ok(packet) = session.link.read(hands::PALM_STREAM, None) {
+                let Some((nn, data)) = NnData::parse(&packet) else {
+                    continue;
+                };
+                let mut h = session.hands.lock().unwrap();
+                if !h.enabled || h.pending.is_some_and(|(_, t)| t.elapsed() < CROP_TIMEOUT) {
+                    continue;
+                }
+                let scores = nn.tensor_f32(data, "classificators").unwrap_or_default();
+                let regressors = nn.tensor_f32(data, "regressors").unwrap_or_default();
+                h.pending = None;
+                h.seen = false;
+                if let Some(b) = view.palm(&scores, &regressors) {
+                    if session.link.write(session.crop_in, &view.crop(&b).to_packet()).is_err() {
+                        break;
+                    }
+                    h.pending = Some((b, Instant::now()));
+                }
+            }
+        });
+    }
+    {
+        // Each landmark result moves the crop on with the hand, and may make a gesture.
+        let session = session.clone();
+        let aspect = vw as f32 / vh as f32;
+        std::thread::spawn(move || {
+            while let Ok(packet) = session.link.read(hands::LANDMARK_STREAM, None) {
+                let Some((nn, data)) = NnData::parse(&packet) else {
+                    continue;
+                };
+                let fired = {
+                    let mut h = session.hands.lock().unwrap();
+                    let Some((b, _)) = h.pending.take() else {
+                        continue;
+                    };
+                    let first = |name: &str| {
+                        nn.tensor_f32(data, name)
+                            .and_then(|v| v.first().copied())
+                            .unwrap_or(0.0)
+                    };
+                    let raw = nn.tensor_f32(data, "Identity_dense/BiasAdd/Add").unwrap_or_default();
+                    let hand = view.hand(&b, first("Identity_1"), first("Identity_2"), &raw);
+                    h.seen = hand.is_some();
+                    if let (Some(hand), true) = (&hand, h.enabled) {
+                        let next = hands::follow(hand);
+                        if session
+                            .link
+                            .write(session.crop_in, &view.crop(&next).to_packet())
+                            .is_ok()
+                        {
+                            h.pending = Some((next, Instant::now()));
+                        }
+                    }
+                    let fired = h.gestures.update(hand.as_ref().and_then(|x| x.gesture(aspect)));
+                    if fired.is_some() {
+                        h.last = fired;
+                    }
+                    fired
+                };
+                let command = match fired {
+                    Some(Gesture::Peace) => {
+                        let off = !session.video_off.load(Ordering::Relaxed);
+                        session.video_off.store(off, Ordering::Relaxed);
+                        None
+                    }
+                    Some(Gesture::Pinch) => {
+                        let zoom = session.zoom.lock().unwrap();
+                        Some(if zoom.enabled {
+                            "zoom off".to_owned()
+                        } else {
+                            format!("zoom {:.2}", zoom.framing.amount)
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(c) = command
+                    && let Err(e) = session.command(&c)
+                {
+                    eprintln!("{c}: {e}");
+                }
+            }
+        });
+    }
+
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
@@ -714,6 +880,10 @@ pub fn run(
     if session.alive.load(Ordering::Relaxed) {
         let mut st = session.state.lock().unwrap();
         let _ = session.set_streaming(&mut st, false);
+        if !st.streaming && st.last_change.elapsed() < STOP_SETTLE {
+            // A reboot straight after a stop can catch the camera mid-stop and take the next boot down with it.
+            std::thread::sleep(STOP_SETTLE - st.last_change.elapsed());
+        }
     }
     result
 }

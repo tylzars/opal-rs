@@ -105,6 +105,13 @@ pub mod resolution {
     pub const P800: i32 = 7;
 }
 
+/// Device processors that run scripts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Processor {
+    LeonCss = 0,
+    LeonMss = 1,
+}
+
 pub mod orientation {
     pub const AUTO: i32 = -1;
     pub const NORMAL: i32 = 0;
@@ -416,6 +423,44 @@ nop_struct!(ImageManipConfig {
 });
 
 impl ImageManipConfig {
+    /// Crops a rotated rectangle, centre and size normalised to the frame, angle in degrees clockwise, and resizes
+    /// it to `width` x `height`.
+    pub fn rotated_crop(center: (f32, f32), size: (f32, f32), angle: f32, width: i32, height: i32) -> Self {
+        let mut c = Self::resize(width, height, false);
+        c.crop.crop_rotated_rect = RotatedRect {
+            center: Point2f {
+                x: center.0,
+                y: center.1,
+            },
+            size: Size2f {
+                width: size.0,
+                height: size.1,
+            },
+            angle,
+        };
+        c.crop.enable_rotated_rect = true;
+        c.crop.normalized_coords = true;
+        c.enable_crop = true;
+        c
+    }
+
+    pub fn to_packet(&self) -> Vec<u8> {
+        crate::message::packet(&[], crate::message::IMAGE_MANIP_CONFIG, &nop::to_vec(self))
+    }
+
+    /// With `skip`, every frame is dropped until another config arrives.
+    pub fn skipping(mut self, skip: bool) -> Self {
+        self.skip_current_image = skip;
+        self
+    }
+
+    /// Fits the frame into `width` x `height`, padding the rest with black.
+    pub fn thumbnail(width: i32, height: i32) -> Self {
+        let mut c = Self::resize(width, height, true);
+        c.resize.lock_aspect_ratio_fill = true;
+        c
+    }
+
     /// Resizes to `width` x `height`, letterboxing when `keep_aspect` is set, stretching otherwise.
     pub fn resize(width: i32, height: i32, keep_aspect: bool) -> Self {
         let mut c = Self::default();
@@ -605,12 +650,12 @@ impl Pipeline {
         })
     }
 
-    /// Python script on the device. `inputs` and `outputs` are the names in its `node.io` map.
-    pub fn script(&mut self, source: &str, inputs: &[&str], outputs: &[&str]) -> NodeId {
+    /// Python script on one of the device's processors. `inputs` and `outputs` are the names in its `node.io` map.
+    pub fn script(&mut self, source: &str, inputs: &[&str], outputs: &[&str], processor: Processor) -> NodeId {
         let props = Script {
             script_uri: "asset:__script".into(),
             script_name: "<script>".into(),
-            processor: 1,
+            processor: processor as i32,
         };
         let mut io: Vec<Io> = inputs
             .iter()
@@ -633,6 +678,17 @@ impl Pipeline {
 
     /// Resizes or crops frames. Inputs "inputImage" (dropped when busy) and "inputConfig", output "out".
     pub fn image_manip(&mut self, config: ImageManipConfig, max_output_size: i32, image_queue: i32) -> NodeId {
+        self.image_manip_with(config, max_output_size, image_queue, false)
+    }
+
+    /// Like `image_manip`; with `wait_for_config` each frame waits for a config on "inputConfig".
+    pub fn image_manip_with(
+        &mut self,
+        config: ImageManipConfig,
+        max_output_size: i32,
+        image_queue: i32,
+        wait_for_config: bool,
+    ) -> NodeId {
         let props = ImageManipProps {
             initial_config: config,
             output_frame_size: max_output_size,
@@ -642,7 +698,7 @@ impl Pipeline {
             name: "ImageManip",
             properties: nop::to_vec(&props),
             io: vec![
-                input("inputConfig", true, 8, false),
+                input("inputConfig", true, 8, wait_for_config),
                 input("inputImage", false, image_queue, true),
                 output("out"),
             ],
@@ -922,7 +978,7 @@ mod tests {
     fn asset_layout_is_aligned() {
         let mut p = Pipeline::default();
         p.set_camera_tuning(vec![1; 10]);
-        p.script("x", &[], &[]);
+        p.script("x", &[], &[], Processor::LeonMss);
         let (_, storage) = p.assets();
         assert_eq!(storage.len(), 64 + 1);
         assert_eq!(storage[64], b'x');

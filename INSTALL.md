@@ -48,11 +48,12 @@
    opal-rs ctl lut ~/looks/warm.cube 0.8   # colour look from an Adobe .cube file, at 80%; lut off removes it
    opal-rs ctl zoom 0.5       # keep your face framed, 0 loose to 1 tight; zoom off turns it off
    opal-rs ctl tracking slow  # how fast framing follows: slow, normal or fast
+   opal-rs ctl gestures on    # hand gestures: a peace sign turns the video off and on, a pinch turns framing on and off
    opal-rs ctl resolution 1440p   # 720p, 1080p (default) or 1440p; restarts the camera
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.
-   Focus, exposure, white balance, image adjustments, microphone gain, blur, background, colour look and framing are
-   saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
+   Focus, exposure, white balance, image adjustments, microphone gain, blur, background, colour look, framing and
+   gestures are saved in `~/.config/opal-rs/settings` and restored the next time the service starts.
 
 4. Or use the control panel, which also shows a preview:
    ```shell

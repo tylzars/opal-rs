@@ -3,9 +3,12 @@
 use std::path::Path;
 
 pub mod faces;
+pub mod hands;
 
 use opal_dai::message::{AudioInConfig, CameraControl, af, antibanding, awb, control, scene};
-use opal_dai::pipeline::{AudioMic, ColorCamera, ImageManipConfig, IspScale, Pipeline, orientation, resolution};
+use opal_dai::pipeline::{
+    AudioMic, ColorCamera, ImageManipConfig, IspScale, Pipeline, Processor, orientation, resolution,
+};
 
 pub const CONTROL_STREAM: &str = "control";
 pub const MIC_STREAM: &str = "micCfg";
@@ -72,8 +75,51 @@ pub const FACE_CONTROL_STREAM: &str = "ctrlFace";
 const FACE_BLOB: &str = "dd0bad95b2.tlv";
 const FACE_INPUT: i32 = 300;
 
-const PREVIEW_WIDTH: u32 = SEGMENTATION_WIDTH;
-const PREVIEW_HEIGHT: u32 = SEGMENTATION_HEIGHT;
+const PREVIEW_WIDTH: u32 = 640;
+const PREVIEW_HEIGHT: u32 = 360;
+/// Parts of the pipeline that are paused while not in use: a crop of the preview and the network it feeds.
+/// Both are paused, as a paused network left with a running crop can hold up the other crops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Branch {
+    Segmentation,
+    Face,
+    Palm,
+}
+
+impl Branch {
+    pub const ALL: [Branch; 3] = [Self::Segmentation, Self::Face, Self::Palm];
+
+    /// Stream for NN config messages to the network.
+    pub fn network_control(self) -> &'static str {
+        match self {
+            Self::Segmentation => SEGMENTATION_CONTROL_STREAM,
+            Self::Face => FACE_CONTROL_STREAM,
+            Self::Palm => hands::PALM_CONTROL_STREAM,
+        }
+    }
+
+    /// Stream for configs to the crop.
+    pub fn crop_control(self) -> &'static str {
+        match self {
+            Self::Segmentation => "ctrlSegmenterImageManip",
+            Self::Face => "ctrlFaceImageManip",
+            Self::Palm => "ctrlPalmImageManip",
+        }
+    }
+
+    /// The crop's config, dropping every frame unless `active`.
+    pub fn crop(self, active: bool) -> ImageManipConfig {
+        let c = match self {
+            Self::Segmentation => ImageManipConfig::resize(SEGMENTATION_WIDTH as i32, SEGMENTATION_HEIGHT as i32, true),
+            Self::Face => ImageManipConfig::resize(FACE_INPUT, FACE_INPUT, false),
+            Self::Palm => ImageManipConfig::thumbnail(hands::PALM_INPUT, hands::PALM_INPUT),
+        };
+        c.skipping(!active)
+    }
+}
+
+/// Size of the frames the face, segmentation and hand networks work from.
+pub const PREVIEW_SIZE: (u32, u32) = (PREVIEW_WIDTH, PREVIEW_HEIGHT);
 
 /// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
 const LED_SCRIPT: &str = r#"
@@ -149,7 +195,7 @@ pub fn stop_control() -> CameraControl {
     c
 }
 
-/// Camera video, person segmentation and face detection to the host over XLink, microphone into UAC, with control streams.
+/// Camera video, person segmentation, face detection and hand landmarks to the host over XLink, microphone into UAC, with control streams.
 pub fn pipeline(asset_dir: &Path, sensor: &str, res: Resolution) -> std::io::Result<Pipeline> {
     let (width, height) = res.size();
     let (num, den) = res.scale();
@@ -193,20 +239,23 @@ pub fn pipeline(asset_dir: &Path, sensor: &str, res: Resolution) -> std::io::Res
     let video = p.xlink_out(VIDEO_STREAM, false, 3, -1.0);
     p.link(cam, "video", video, "in");
 
+    let (sw, sh) = (SEGMENTATION_WIDTH as i32, SEGMENTATION_HEIGHT as i32);
+    let seg_size = p.image_manip(Branch::Segmentation.crop(false), sw * sh * 3, 1);
+    p.link(cam, "preview", seg_size, "inputImage");
+    let seg_crop = p.xlink_in(Branch::Segmentation.crop_control(), 1024);
+    p.link(seg_crop, "out", seg_size, "inputConfig");
     let seg = p.neural_network(std::fs::read(asset_dir.join(SEGMENTATION_BLOB))?, 2, 2, 0);
-    p.link(cam, "preview", seg, "in");
+    p.link(seg_size, "out", seg, "in");
     let seg_out = p.xlink_out(SEGMENTATION_STREAM, false, 1, 30.0);
     p.link(seg, "out", seg_out, "in");
     let seg_ctrl = p.xlink_in(SEGMENTATION_CONTROL_STREAM, 256);
     p.link(seg_ctrl, "out", seg, "inConfig");
 
-    let face_size = p.image_manip(
-        ImageManipConfig::resize(FACE_INPUT, FACE_INPUT, false),
-        FACE_INPUT * FACE_INPUT * 3,
-        4,
-    );
+    let face_size = p.image_manip(Branch::Face.crop(false), FACE_INPUT * FACE_INPUT * 3, 4);
     p.link(cam, "preview", face_size, "inputImage");
-    let face = p.neural_network(std::fs::read(asset_dir.join(FACE_BLOB))?, 2, 1, 1);
+    let face_crop = p.xlink_in(Branch::Face.crop_control(), 1024);
+    p.link(face_crop, "out", face_size, "inputConfig");
+    let face = p.neural_network(std::fs::read(asset_dir.join(FACE_BLOB))?, 2, 2, 1);
     p.link(face_size, "out", face, "in");
     let face_out = p.xlink_out(FACE_STREAM, false, 1, 30.0);
     p.link(face, "out", face_out, "in");
@@ -223,7 +272,28 @@ pub fn pipeline(asset_dir: &Path, sensor: &str, res: Resolution) -> std::io::Res
     let mic_cfg = p.xlink_in(MIC_STREAM, 256);
     p.link(mic_cfg, "out", mic, "inputConfig");
 
-    let led = p.script(LED_SCRIPT, &["led"], &[]);
+    let blob = |name: &str| std::fs::read(asset_dir.join(name));
+    let (pd, lm) = (hands::PALM_INPUT, hands::LANDMARK_INPUT);
+    let palm_size = p.image_manip(Branch::Palm.crop(false), pd * pd * 3, 1);
+    p.link(cam, "preview", palm_size, "inputImage");
+    let palm_crop = p.xlink_in(Branch::Palm.crop_control(), 1024);
+    p.link(palm_crop, "out", palm_size, "inputConfig");
+    let palm = p.neural_network(blob(hands::PALM_BLOB)?, 2, 1, 0);
+    p.link(palm_size, "out", palm, "in");
+    let palm_out = p.xlink_out(hands::PALM_STREAM, false, 1, 15.0);
+    p.link(palm, "out", palm_out, "in");
+    let palm_ctrl = p.xlink_in(hands::PALM_CONTROL_STREAM, 256);
+    p.link(palm_ctrl, "out", palm, "inConfig");
+    let hand_crop = p.image_manip_with(ImageManipConfig::resize(lm, lm, false), lm * lm * 3, 1, true);
+    p.link(cam, "preview", hand_crop, "inputImage");
+    let crop_in = p.xlink_in(hands::CROP_STREAM, 1024);
+    p.link(crop_in, "out", hand_crop, "inputConfig");
+    let landmarks = p.neural_network(blob(hands::LANDMARK_BLOB)?, 2, 1, 0);
+    p.link(hand_crop, "out", landmarks, "in");
+    let landmarks_out = p.xlink_out(hands::LANDMARK_STREAM, false, 2, -1.0);
+    p.link(landmarks, "out", landmarks_out, "in");
+
+    let led = p.script(LED_SCRIPT, &["led"], &[], Processor::LeonMss);
     let led_in = p.xlink_in(LED_STREAM, 64);
     p.link(led_in, "out", led, "led");
     Ok(p)

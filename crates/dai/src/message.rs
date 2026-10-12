@@ -7,6 +7,7 @@ pub const BUFFER: i32 = 0;
 pub const IMG_FRAME: i32 = 1;
 pub const NN_DATA: i32 = 2;
 pub const NN_CONFIG: i32 = 3;
+pub const IMAGE_MANIP_CONFIG: i32 = 4;
 pub const CAMERA_CONTROL: i32 = 5;
 pub const AUDIO_IN_CONFIG: i32 = 19;
 

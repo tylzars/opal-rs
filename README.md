@@ -18,6 +18,7 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Background blur or a background picture, using person segmentation running on the camera.
 - Colour looks from Adobe `.cube` files.
 - Face framing: the picture follows your face, using face detection running on the camera.
+- Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
