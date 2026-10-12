@@ -14,7 +14,7 @@ use opal_c1::faces::{self, Tracker};
 use opal_c1::hands::{self, Gesture, Gestures, HandBox, View};
 use opal_c1::{Branch, Resolution};
 use opal_dai::device::Device;
-use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
+use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, antibanding, awb};
 use opal_effects::{BackgroundBlur, Cube, Framing, Mask, Speed, YuvLut, crop_scale};
 use opal_xlink::{Link, StreamId};
 
@@ -80,6 +80,15 @@ struct State {
     /// Frame count when streaming last started, and when the first frame after that arrived.
     start_frames: u64,
     first_frame: Option<Instant>,
+}
+
+/// Fixed facts about the connected camera, shown in status.
+pub struct DeviceInfo {
+    pub serial: String,
+    /// USB link speed: high, super and so on.
+    pub usb: String,
+    /// Short commit of the camera firmware.
+    pub firmware: String,
 }
 
 /// Background blur settings and the latest person mask.
@@ -197,6 +206,7 @@ struct Session {
     mic_state: Mutex<(bool, f32)>,
     /// Set by the peace gesture: black frames instead of video.
     video_off: AtomicBool,
+    info: DeviceInfo,
     settings: Mutex<Settings>,
     frames: AtomicU64,
     /// Average chip temperature in degrees C.
@@ -313,7 +323,7 @@ impl Session {
                     "off".into()
                 };
                 Ok(format!(
-                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} mic {} video {}",
+                    "mode {} power {} resolution {} temperature {} streaming {} consumers {} frames {} blur {} background {} masks {} person {:.2} lut {} zoom {} gestures {} mic {} video {} usb {} serial {} firmware {}",
                     format!("{:?}", st.mode).to_lowercase(),
                     if self.low_power { "low" } else { "normal" },
                     self.resolution.name(),
@@ -347,6 +357,9 @@ impl Session {
                     } else {
                         "on"
                     },
+                    self.info.usb,
+                    self.info.serial,
+                    self.info.firmware,
                 ))
             }
             ["zoom", amount] => {
@@ -522,6 +535,15 @@ impl Session {
 fn parse_control(line: &str) -> Option<CameraControl> {
     let mut words = line.split_whitespace();
     let cmd = words.next()?;
+    if cmd == "antibanding" {
+        let mode = match (words.next(), words.next()) {
+            (Some(m), None) => crate::mains::mode(m)?,
+            _ => return None,
+        };
+        let mut c = CameraControl::default();
+        c.anti_banding(mode);
+        return Some(c);
+    }
     let args: Vec<i64> = words.map(|w| w.parse().ok()).collect::<Option<_>>()?;
     let mut c = CameraControl::default();
     match (cmd, args.as_slice()) {
@@ -636,6 +658,7 @@ pub fn run(
     output: Option<PathBuf>,
     settings: Settings,
     overrides: &[String],
+    info: DeviceInfo,
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     // In low power mode apps use the camera itself, not the virtual camera.
@@ -656,7 +679,8 @@ pub fn run(
     if let Some(level) = std::env::var("OPAL_RS_LOG").ok().and_then(|l| log_level(&l)) {
         dev.call("setLogLevel", vec![level.into()])?;
     }
-    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution, low_power)?)?;
+    let banding = crate::mains::mode(settings.antibanding()).unwrap_or(antibanding::HZ_60);
+    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, sensor, resolution, low_power, banding)?)?;
     let session = Arc::new(Session {
         link: dev.link().clone(),
         control: streams[opal_c1::CONTROL_STREAM],
@@ -697,6 +721,7 @@ pub fn run(
         }),
         mic_state: Mutex::new((true, 0.0)),
         video_off: AtomicBool::new(false),
+        info,
         settings: Mutex::new(settings),
         frames: AtomicU64::new(0),
         temperature: Mutex::new(None),
@@ -1010,4 +1035,17 @@ pub fn send(words: &[String]) -> Result<bool> {
         println!("{reply}");
     }
     Ok(!reply.starts_with("error:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antibanding_commands() {
+        assert!(parse_control("antibanding 50").is_some());
+        assert!(parse_control("antibanding auto").is_some());
+        assert!(parse_control("antibanding 70").is_none());
+        assert!(parse_control("antibanding").is_none());
+    }
 }

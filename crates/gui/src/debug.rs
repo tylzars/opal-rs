@@ -65,6 +65,14 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         })
     });
     ui.horizontal(|ui| {
+        ui.label("Flicker");
+        for (v, name) in [("auto", "Auto"), ("50", "50 Hz"), ("60", "60 Hz"), ("off", "Off")] {
+            if ui.radio_value(&mut c.antibanding, v.to_owned(), name).changed() {
+                cmds.push(format!("antibanding {v}"));
+            }
+        }
+    });
+    ui.horizontal(|ui| {
         ui.label("Streaming");
         for (m, name) in [(Mode::Auto, "Auto"), (Mode::On, "On"), (Mode::Off, "Off")] {
             if ui.radio_value(&mut app.mode, m, name).changed() {

@@ -80,6 +80,7 @@ struct Controls {
     gestures: bool,
     low_power: bool,
     resolution: String,
+    antibanding: String,
 }
 
 impl Default for Controls {
@@ -112,6 +113,7 @@ impl Default for Controls {
             gestures: false,
             low_power: false,
             resolution: "1080p".into(),
+            antibanding: "auto".into(),
         }
     }
 }
@@ -157,6 +159,7 @@ impl Controls {
                 ["gestures", g] => c.gestures = *g == "on",
                 ["power", p] => c.low_power = *p == "low",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
+                ["antibanding", a] => c.antibanding = (*a).to_owned(),
                 _ => {}
             }
         }

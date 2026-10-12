@@ -14,12 +14,13 @@ Composer. The files the camera needs are extracted from your own copy of the Opa
 - Boots the camera's firmware from RAM and runs it as a webcam: video goes to a virtual camera
   ("Opal C1 Virtual", via `v4l2loopback`), the microphone appears as a normal USB microphone.
 - Streams only while an app uses the camera; the status LED is white while it streams.
-- Focus, exposure, white balance, image adjustments and microphone gain.
+- Focus, exposure, white balance, light flicker (50/60 Hz), image adjustments, microphone gain and mute.
 - Background blur or a background picture, using person segmentation running on the camera.
 - Colour looks: ten built in (black and white, faded, vivid, warm, cool and more), or your own Adobe `.cube` files.
 - Face framing: the picture follows your face, using face detection running on the camera.
 - Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off.
 - Low power mode: the camera works as an ordinary webcam with no effects, so your computer does less work.
+- On a USB 2 port the video drops to 720p, as the official app does.
 - Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
 
 It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.

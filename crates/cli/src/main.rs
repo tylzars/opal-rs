@@ -1,4 +1,5 @@
 mod daemon;
+mod mains;
 mod settings;
 
 use std::path::{Path, PathBuf};
@@ -126,9 +127,14 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
     let booted = boot(dir, low_power)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = sensor_name(&dev)?;
+    let info = device_info(&dev);
+    let slow_usb = matches!(info.usb.as_str(), "low" | "full" | "high");
     // Low power mode streams 1080p, as the camera's own USB video has no other size.
     let resolution = if low_power {
         opal_c1::Resolution::P1080
+    } else if slow_usb && settings.resolution() != opal_c1::Resolution::P720 {
+        println!("camera is on a USB {} port, using 720p; plug it into a USB 3 port for more", info.usb);
+        opal_c1::Resolution::P720
     } else {
         settings.resolution()
     };
@@ -137,7 +143,31 @@ fn run_session(dir: &Path, output: Option<PathBuf>, settings: settings::Settings
         resolution.name(),
         if low_power { " low power" } else { "" }
     );
-    daemon::run(dev, dir, &sensor, resolution, low_power, output, settings, overrides)
+    daemon::run(dev, dir, &sensor, resolution, low_power, output, settings, overrides, info)
+}
+
+fn device_info(dev: &Device) -> daemon::DeviceInfo {
+    use opal_dai::msgpack::Value;
+    let serial = match dev.call("getMxId", vec![]) {
+        Ok(Value::Str(s)) => s,
+        _ => "-".into(),
+    };
+    let usb = match dev.call("getUsbSpeed", vec![]) {
+        Ok(Value::Int(n)) => n,
+        Ok(Value::UInt(n)) => n as i64,
+        _ => 0,
+    };
+    let usb = ["unknown", "low", "full", "high", "super", "super-plus"]
+        .get(usb as usize)
+        .unwrap_or(&"unknown");
+    // The firmware file name ends in its commit.
+    let name = firmware_asset().file_name.trim_end_matches(".cmd");
+    let firmware = name.rsplit('-').next().unwrap_or(name);
+    daemon::DeviceInfo {
+        serial,
+        usb: (*usb).into(),
+        firmware: firmware[..firmware.len().min(8)].into(),
+    }
 }
 
 fn check_boot_interval() -> Result<()> {

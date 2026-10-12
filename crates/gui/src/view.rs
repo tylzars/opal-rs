@@ -812,8 +812,17 @@ fn look_row(ui: &mut Ui, c: &mut Controls, v: &mut State, cmds: &mut Vec<String>
 
 /// Resolution, when the camera runs, and low power mode.
 fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
+    let info = |k| app.status_value(k).map(str::to_owned);
+    let (usb, serial, firmware) = (info("usb"), info("serial"), info("firmware"));
     let (c, mode) = (&mut app.c, &mut app.mode);
     card(ui, "", |ui| {
+        if matches!(usb.as_deref(), Some("low" | "full" | "high")) {
+            ui.label(
+                egui::RichText::new("The camera is on a slow USB port, so video is limited to 720p. Use a USB 3 port.")
+                    .color(AMBER),
+            );
+            ui.add_space(4.0);
+        }
         ui.add_enabled_ui(!c.low_power, |ui| {
             ui.label(egui::RichText::new("Resolution").color(TEXT));
             let options = RESOLUTIONS.map(|(n, _, _)| (n.to_owned(), n));
@@ -822,6 +831,18 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             }
             hint(ui, "Changing this restarts the camera.");
         });
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Light flicker").color(TEXT));
+        let options = [
+            ("auto".to_owned(), "Auto"),
+            ("50".to_owned(), "50 Hz"),
+            ("60".to_owned(), "60 Hz"),
+            ("off".to_owned(), "Off"),
+        ];
+        if theme::segmented(ui, "antibanding", &mut c.antibanding, &options) {
+            cmds.push(format!("antibanding {}", c.antibanding));
+        }
+        hint(ui, "Removes flicker from mains lighting. Auto goes by your time zone.");
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Camera on").color(TEXT));
         let modes = [(Mode::Auto, "When needed"), (Mode::On, "Always"), (Mode::Off, "Never")];
@@ -845,6 +866,10 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             &mut c.low_power,
         ) {
             cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
+        }
+        if let (Some(serial), Some(firmware), Some(usb)) = (&serial, &firmware, &usb) {
+            ui.add_space(4.0);
+            hint(ui, &format!("Serial {serial}, firmware {firmware}, USB {usb} speed"));
         }
     });
 }
@@ -949,7 +974,7 @@ fn manual(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
 }
 
 /// What each setting does, in a few words.
-const HELP: [(&str, &str); 12] = [
+const HELP: [(&str, &str); 13] = [
     (
         "Follow my face",
         "Keeps you in the middle of the picture as you move around. How close sets how tightly you are framed, \
@@ -989,6 +1014,11 @@ const HELP: [(&str, &str); 12] = [
     (
         "Resolution",
         "How sharp the picture is. Higher is sharper but asks more of your computer. Changing it restarts the camera.",
+    ),
+    (
+        "Light flicker",
+        "Removes the flicker or rolling bands that mains-powered lights can cause. Auto picks 50 or 60 Hz from your \
+         time zone; pick one yourself if the bands stay.",
     ),
     (
         "Camera on",

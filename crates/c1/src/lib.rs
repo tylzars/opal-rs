@@ -5,7 +5,7 @@ use std::path::Path;
 pub mod faces;
 pub mod hands;
 
-use opal_dai::message::{AudioInConfig, CameraControl, af, antibanding, awb, control, scene};
+use opal_dai::message::{AudioInConfig, CameraControl, af, awb, control, scene};
 use opal_dai::pipeline::{
     AudioMic, ColorCamera, ImageManipConfig, IspScale, Pipeline, Processor, Uvc, orientation, resolution,
 };
@@ -201,13 +201,19 @@ pub fn stop_control() -> CameraControl {
 /// Camera video, person segmentation, face detection and hand landmarks to the host over XLink, microphone into UAC,
 /// with control streams. In low power mode the video goes straight to the camera's own USB video output instead,
 /// with no networks.
-pub fn pipeline(asset_dir: &Path, sensor: &str, res: Resolution, low_power: bool) -> std::io::Result<Pipeline> {
+pub fn pipeline(
+    asset_dir: &Path,
+    sensor: &str,
+    res: Resolution,
+    low_power: bool,
+    anti_banding: u8,
+) -> std::io::Result<Pipeline> {
     let (width, height) = res.size();
     let (num, den) = res.scale();
     let mut p = Pipeline::default();
     p.set_xlink_chunk_size(0);
     let mut init = CameraControl::default();
-    init.anti_banding(antibanding::HZ_60)
+    init.anti_banding(anti_banding)
         .auto_exposure()
         .scene_mode(scene::FACE_PRIORITY)
         .control_mode(control::USE_SCENE_MODE);

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// Commands that change a camera image setting, resent whenever streaming starts.
 const CAMERA: &[&str] = &[
+    "antibanding",
     "focus",
     "exposure",
     "ev",
@@ -35,6 +36,7 @@ fn group(command: &str) -> Option<&'static str> {
         "contrast" => "contrast",
         "saturation" => "saturation",
         "sharpness" => "sharpness",
+        "antibanding" => "antibanding",
         "gain" => "gain",
         "mic" => "mic",
         "blur" => "blur",
@@ -101,6 +103,14 @@ impl Settings {
             .and_then(|c| c.split_whitespace().nth(1))
             .and_then(opal_c1::Resolution::parse)
             .unwrap_or_default()
+    }
+
+    /// The saved anti-banding setting: off, 50, 60 or auto.
+    pub fn antibanding(&self) -> &str {
+        self.commands
+            .get("antibanding")
+            .and_then(|c| c.split_whitespace().nth(1))
+            .unwrap_or("auto")
     }
 
     /// True when low power mode is saved.
