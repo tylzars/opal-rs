@@ -15,6 +15,18 @@ pub fn config_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("opal-rs")
 }
 
+/// Where installed copies keep the camera files: `~/.local/share/opal-rs` on Linux, `%LOCALAPPDATA%\opal-rs` on
+/// Windows.
+pub fn data_dir() -> PathBuf {
+    #[cfg(unix)]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    base.unwrap_or_else(std::env::temp_dir).join("opal-rs")
+}
+
 /// Local wall-clock time as HH:MM.
 pub fn local_time() -> String {
     #[cfg(unix)]

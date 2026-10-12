@@ -18,8 +18,11 @@ use opal_dai::board::BoardConfig;
 use opal_dai::boot::Step;
 use opal_dai::device::Device;
 
-/// `assets/` at the repository root.
-const ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
+/// `assets/` at the repository root. Left out of packaged builds (`OPAL_RS_PACKAGED` set), which have no source tree.
+const ASSET_DIR: Option<&str> = match option_env!("OPAL_RS_PACKAGED") {
+    Some(_) => None,
+    None => Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets")),
+};
 
 #[derive(Parser)]
 #[command(version, about = "Opal C1 tools")]
@@ -80,20 +83,27 @@ enum AssetsCommand {
     Verify,
 }
 
-/// Camera files: `OPAL_RS_ASSETS`, else `assets/` in the source tree this was built from, else `assets/` next to
-/// the program (as in a release).
+/// Camera files: `OPAL_RS_ASSETS`; else `assets/` in the source tree this was built from or next to the program,
+/// whichever holds the firmware; else the source tree's `assets/` if it exists (where its disk image goes); else the
+/// user's data folder, which installed copies use as they cannot write next to themselves.
 fn asset_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("OPAL_RS_ASSETS") {
         return dir.into();
     }
-    let built = Path::new(ASSET_DIR);
-    if built.is_dir() {
-        return built.canonicalize().unwrap_or_else(|_| built.to_path_buf());
-    }
-    std::env::current_exe()
+    let built = ASSET_DIR.map(PathBuf::from);
+    let beside = std::env::current_exe()
         .ok()
-        .and_then(|exe| Some(exe.canonicalize().ok()?.parent()?.join("assets")))
-        .unwrap_or_else(|| "assets".into())
+        .and_then(|exe| Some(exe.canonicalize().ok()?.parent()?.join("assets")));
+    let holds_firmware = |d: &PathBuf| d.join(firmware_asset().file_name).is_file();
+    let found = [built.clone(), beside]
+        .into_iter()
+        .flatten()
+        .find(holds_firmware)
+        .or_else(|| built.filter(|b| b.is_dir()));
+    match found {
+        Some(d) => d.canonicalize().unwrap_or(d),
+        None => platform::data_dir().join("assets"),
+    }
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
