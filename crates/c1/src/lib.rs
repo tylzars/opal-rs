@@ -15,6 +15,14 @@ pub const VIDEO_STREAM: &str = "rgb";
 pub const VIDEO_WIDTH: u32 = 1920;
 pub const VIDEO_HEIGHT: u32 = 1080;
 
+/// Person segmentation of the preview, FP16 [2, 144, 256]: background and person scores.
+pub const SEGMENTATION_STREAM: &str = "google_meet_segmentation";
+/// NN config messages that pause or resume segmentation.
+pub const SEGMENTATION_CONTROL_STREAM: &str = "ctrlSegmenter";
+pub const SEGMENTATION_WIDTH: u32 = 256;
+pub const SEGMENTATION_HEIGHT: u32 = 144;
+const SEGMENTATION_BLOB: &str = "49559974de.tlv";
+
 /// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
 const LED_SCRIPT: &str = r#"
 import GPIO
@@ -89,7 +97,7 @@ pub fn stop_control() -> CameraControl {
     c
 }
 
-/// Camera video to the host over XLink and microphone into UAC, with control streams.
+/// Camera video and person segmentation to the host over XLink, microphone into UAC, with control streams.
 pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     let mut p = Pipeline::default();
     let mut init = CameraControl::default();
@@ -106,8 +114,8 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
         board_socket: 0,
         image_orientation: orientation::ROTATE_180,
         interleaved: false,
-        preview_width: 640,
-        preview_height: 360,
+        preview_width: SEGMENTATION_WIDTH,
+        preview_height: SEGMENTATION_HEIGHT,
         video_width: VIDEO_WIDTH as i32,
         video_height: VIDEO_HEIGHT as i32,
         resolution: resolution::K4,
@@ -123,8 +131,15 @@ pub fn pipeline(asset_dir: &Path, sensor: &str) -> std::io::Result<Pipeline> {
     if let Some(file) = tuning_file(sensor) {
         p.set_camera_tuning(std::fs::read(asset_dir.join(file))?);
     }
-    let video = p.xlink_out(VIDEO_STREAM, false, 3);
+    let video = p.xlink_out(VIDEO_STREAM, false, 3, -1.0);
     p.link(cam, "video", video, "in");
+
+    let seg = p.neural_network(std::fs::read(asset_dir.join(SEGMENTATION_BLOB))?, 2, 2);
+    p.link(cam, "preview", seg, "in");
+    let seg_out = p.xlink_out(SEGMENTATION_STREAM, false, 1, 30.0);
+    p.link(seg, "out", seg_out, "in");
+    let seg_ctrl = p.xlink_in(SEGMENTATION_CONTROL_STREAM, 256);
+    p.link(seg_ctrl, "out", seg, "inConfig");
     let ctrl = p.xlink_in(CONTROL_STREAM, 1024);
     p.link(ctrl, "out", cam, "inputControl");
     let config = p.xlink_in(CONFIG_STREAM, 256);

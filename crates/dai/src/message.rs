@@ -6,6 +6,7 @@ use crate::nop_struct;
 pub const BUFFER: i32 = 0;
 pub const IMG_FRAME: i32 = 1;
 pub const NN_DATA: i32 = 2;
+pub const NN_CONFIG: i32 = 3;
 pub const CAMERA_CONTROL: i32 = 5;
 pub const AUDIO_IN_CONFIG: i32 = 19;
 
@@ -470,6 +471,19 @@ mod tests {
     }
 }
 
+/// Turns a neural network's processing on or off.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NnConfig {
+    pub process_inputs: bool,
+}
+nop_struct!(NnConfig { process_inputs });
+
+impl NnConfig {
+    pub fn to_packet(&self) -> Vec<u8> {
+        packet(&[], NN_CONFIG, &nop::to_vec(self))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorInfo {
     pub order: i32,
@@ -580,6 +594,12 @@ mod nn_tests {
         assert_eq!(d.tensors[0].name, "out");
         assert_eq!(d.tensors[0].dims, [1, 10]);
         assert_eq!(d.sequence_num, 5);
+    }
+
+    #[test]
+    fn nn_config_vector() {
+        let p = NnConfig { process_inputs: false }.to_packet();
+        assert_eq!(p, hex("b9 01 00 03 00 00 00 03 00 00 00"));
     }
 
     #[test]

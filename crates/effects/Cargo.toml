@@ -1,0 +1,8 @@
+[package]
+name = "opal-effects"
+description = "Image effects for NV12 video frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

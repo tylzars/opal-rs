@@ -16,5 +16,6 @@ libc = "0.2.190"
 opal-assets = { path = "../assets" }
 opal-c1 = { version = "0.1.0", path = "../c1" }
 opal-dai = { version = "0.1.0", path = "../dai" }
+opal-effects = { version = "0.1.0", path = "../effects" }
 opal-v4l2 = { version = "0.1.0", path = "../v4l2" }
 opal-xlink = { version = "0.1.0", path = "../xlink" }

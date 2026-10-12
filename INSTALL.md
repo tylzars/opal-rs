@@ -32,7 +32,7 @@
    systemctl --user enable --now opal-rs
    ```
    Apps see the camera as "Opal C1 Virtual" (`/dev/video10`). It streams while an app has it open and the LED is
-   white while it streams.
+   white while it streams. Add `--blur 24` to `ExecStart` to start with the background blurred.
 3. Control it while it runs:
    ```shell
    opal-rs ctl status
@@ -41,6 +41,7 @@
    opal-rs ctl exposure 10000 400
    opal-rs ctl ae
    opal-rs ctl gain 20        # microphone gain in dB
+   opal-rs ctl blur 24        # blur the background, radius in pixels; blur 0 turns it off
    ```
    `opal-rs ctl on` and `opal-rs ctl off` force streaming on or off; `opal-rs ctl auto` goes back to following apps.
 

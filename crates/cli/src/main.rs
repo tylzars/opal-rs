@@ -39,6 +39,9 @@ enum Command {
         /// v4l2loopback device to write video to
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Background blur radius in pixels, 0 for none
+        #[arg(long, default_value_t = 0)]
+        blur: usize,
     },
     /// Send a command to a running camera, e.g. `ctl status` or `ctl focus 120`
     Ctl {
@@ -178,12 +181,12 @@ fn main() -> Result<ExitCode> {
             dev.close();
             Ok(ExitCode::SUCCESS)
         }
-        Command::Run { output } => {
+        Command::Run { output, blur } => {
             let booted = boot(&dir)?;
             let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
             let sensor = sensor_name(&dev)?;
             println!("sensor {sensor}");
-            daemon::run(dev, &dir, &sensor, output)?;
+            daemon::run(dev, &dir, &sensor, output, blur)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Ctl { command } => Ok(if daemon::send(&command)? {

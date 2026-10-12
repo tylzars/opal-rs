@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use opal_c1::Led;
 use opal_dai::device::Device;
-use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, af, awb};
+use opal_dai::message::{self, AudioInConfig, CameraControl, IMG_FRAME, NnConfig, NnData, af, awb};
+use opal_effects::{BackgroundBlur, Mask};
 use opal_xlink::{Link, StreamId};
 
 /// How long the camera keeps streaming after the last app closes the output.
@@ -19,6 +20,10 @@ const OFF_DELAY: Duration = Duration::from_secs(2);
 /// and stopping it before then hangs the firmware.
 const MIN_HOLD: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(250);
+/// Blur radius for `blur on`, in frame pixels.
+const DEFAULT_BLUR: usize = 24;
+/// How far each new mask moves the smoothed one.
+const MASK_FOLLOW: f32 = 0.5;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 
@@ -50,13 +55,25 @@ struct State {
     last_change: Instant,
 }
 
+/// Background blur settings and the latest person mask.
+#[derive(Default)]
+struct Blur {
+    /// In frame pixels; 0 is off.
+    radius: usize,
+    mask: Option<Mask>,
+    masks: u64,
+    layout: String,
+}
+
 struct Session {
     link: Arc<Link>,
     control: StreamId,
     mic: StreamId,
     led: StreamId,
+    seg_ctrl: StreamId,
     output: Option<PathBuf>,
     state: Mutex<State>,
+    blur: Mutex<Blur>,
     frames: AtomicU64,
     last_frame: Mutex<Vec<u8>>,
     alive: AtomicBool,
@@ -100,14 +117,42 @@ impl Session {
         match words.as_slice() {
             ["status"] => {
                 let st = self.state.lock().unwrap();
+                let blur = self.blur.lock().unwrap();
+                let person = blur
+                    .mask
+                    .as_ref()
+                    .map_or(0.0, |m| m.data.iter().sum::<f32>() / m.data.len() as f32);
                 Ok(format!(
-                    "mode {:?} streaming {} consumers {} frames {}",
+                    "mode {:?} streaming {} consumers {} frames {} blur {} masks {} person {:.2} {}",
                     st.mode,
                     st.streaming,
                     st.consumers,
-                    self.frames.load(Ordering::Relaxed)
+                    self.frames.load(Ordering::Relaxed),
+                    blur.radius,
+                    blur.masks,
+                    person,
+                    blur.layout,
                 )
                 .to_lowercase())
+            }
+            ["blur", radius] => {
+                let radius: usize = match *radius {
+                    "off" => 0,
+                    "on" => DEFAULT_BLUR,
+                    r => r.parse()?,
+                };
+                let mut blur = self.blur.lock().unwrap();
+                if (radius > 0) != (blur.radius > 0) {
+                    let config = NnConfig {
+                        process_inputs: radius > 0,
+                    };
+                    self.link.write(self.seg_ctrl, &config.to_packet())?;
+                    if radius == 0 {
+                        blur.mask = None;
+                    }
+                }
+                blur.radius = radius;
+                Ok(String::new())
             }
             [mode @ ("auto" | "on" | "off")] => {
                 self.state.lock().unwrap().mode = match *mode {
@@ -237,7 +282,8 @@ fn handle(session: &Session, stream: UnixStream) -> Result<()> {
 }
 
 /// Starts the pipeline on a booted camera and serves commands until told to stop.
-pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>) -> Result<()> {
+/// `blur` is the background blur radius in frame pixels, 0 for none.
+pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>, blur: usize) -> Result<()> {
     let output = output
         .map(|p| p.canonicalize().with_context(|| p.display().to_string()))
         .transpose()?;
@@ -260,6 +306,7 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>) -> Re
         control: streams[opal_c1::CONTROL_STREAM],
         mic: streams[opal_c1::MIC_STREAM],
         led: streams[opal_c1::LED_STREAM],
+        seg_ctrl: streams[opal_c1::SEGMENTATION_CONTROL_STREAM],
         output: output.clone(),
         state: Mutex::new(State {
             mode: Mode::Auto,
@@ -267,6 +314,10 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>) -> Re
             consumers: 0,
             last_consumer: None,
             last_change: Instant::now(),
+        }),
+        blur: Mutex::new(Blur {
+            radius: blur,
+            ..Default::default()
         }),
         frames: AtomicU64::new(0),
         last_frame: Mutex::new(Vec::new()),
@@ -276,23 +327,73 @@ pub fn run(dev: Device, dir: &Path, sensor: &str, output: Option<PathBuf>) -> Re
         .link
         .write(session.control, &opal_c1::start_control().to_packet())?;
     session.link.write(session.led, &Led::White.packet())?;
+    if blur == 0 {
+        let config = NnConfig { process_inputs: false };
+        session.link.write(session.seg_ctrl, &config.to_packet())?;
+    }
 
     {
         let session = session.clone();
         std::thread::spawn(move || {
+            let (w, h) = (opal_c1::VIDEO_WIDTH as usize, opal_c1::VIDEO_HEIGHT as usize);
+            let mut effects = BackgroundBlur::new(w, h);
+            let mut frame = Vec::new();
             while let Ok(packet) = session.link.read(opal_c1::VIDEO_STREAM, None) {
                 let Some((data, IMG_FRAME, _)) = message::split(&packet) else {
                     continue;
                 };
+                frame.clear();
+                frame.extend_from_slice(data);
+                let (radius, mask) = {
+                    let blur = session.blur.lock().unwrap();
+                    (blur.radius, blur.mask.clone())
+                };
+                if let (r @ 1.., Some(mask), true) = (radius, &mask, frame.len() >= w * h * 3 / 2) {
+                    effects.apply(&mut frame, mask, r);
+                }
                 if let Some(out) = &mut out
-                    && let Err(e) = out.write(data)
+                    && let Err(e) = out.write(&frame)
                 {
                     eprintln!("output: {e}");
                 }
                 session.frames.fetch_add(1, Ordering::Relaxed);
-                *session.last_frame.lock().unwrap() = data.to_vec();
+                std::mem::swap(&mut *session.last_frame.lock().unwrap(), &mut frame);
             }
             session.alive.store(false, Ordering::Relaxed);
+        });
+    }
+    {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let (w, h) = (
+                opal_c1::SEGMENTATION_WIDTH as usize,
+                opal_c1::SEGMENTATION_HEIGHT as usize,
+            );
+            while let Ok(packet) = session.link.read(opal_c1::SEGMENTATION_STREAM, None) {
+                let Some((nn, data)) = NnData::parse(&packet) else {
+                    continue;
+                };
+                let mut blur = session.blur.lock().unwrap();
+                blur.masks += 1;
+                if blur.layout.is_empty() {
+                    blur.layout = nn
+                        .tensors
+                        .iter()
+                        .map(|t| format!("{} {:?} order {:#x} type {}", t.name, t.dims, t.order, t.data_type))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                }
+                let Some(next) = nn
+                    .tensor_f32(data, "segment")
+                    .and_then(|scores| Mask::from_scores(&scores, w, h))
+                else {
+                    continue;
+                };
+                match &mut blur.mask {
+                    Some(m) => m.follow(&next, MASK_FOLLOW),
+                    None => blur.mask = Some(next),
+                }
+            }
         });
     }
 

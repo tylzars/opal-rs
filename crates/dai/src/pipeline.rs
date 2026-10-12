@@ -248,13 +248,15 @@ struct NeuralNetwork {
     num_frames: u32,
     num_threads: u32,
     num_nce_per_thread: u32,
+    num_frames_to_skip: i32,
 }
 nop_struct!(NeuralNetwork {
     blob_size,
     blob_uri,
     num_frames,
     num_threads,
-    num_nce_per_thread
+    num_nce_per_thread,
+    num_frames_to_skip
 });
 
 #[derive(Clone, Debug)]
@@ -341,11 +343,11 @@ impl Pipeline {
         })
     }
 
-    /// Stream the host reads messages from. Input "in".
-    pub fn xlink_out(&mut self, stream: &str, blocking: bool, queue_size: i32) -> NodeId {
+    /// Stream the host reads messages from. Input "in". `max_fps` -1 means no limit.
+    pub fn xlink_out(&mut self, stream: &str, blocking: bool, queue_size: i32, max_fps: f32) -> NodeId {
         self.xlink_out.push(stream.into());
         let props = XLinkOut {
-            max_fps_limit: -1.0,
+            max_fps_limit: max_fps,
             stream_name: stream.into(),
             metadata_only: false,
         };
@@ -413,20 +415,21 @@ impl Pipeline {
         })
     }
 
-    /// Neural network. Input "in", outputs "out" and "passthrough".
-    pub fn neural_network(&mut self, blob: Vec<u8>, num_threads: u32) -> NodeId {
+    /// Neural network. Inputs "in" (frames, dropped when busy) and "inConfig", outputs "out" and "passthrough".
+    pub fn neural_network(&mut self, blob: Vec<u8>, pool_frames: u32, num_threads: u32) -> NodeId {
         let props = NeuralNetwork {
             blob_size: Some(blob.len() as u32),
             blob_uri: "asset:__blob".into(),
-            num_frames: 8,
+            num_frames: pool_frames,
             num_threads,
             num_nce_per_thread: 0,
+            num_frames_to_skip: 0,
         };
         self.add(Node {
             name: "NeuralNetwork",
             properties: nop::to_vec(&props),
             io: vec![
-                input("in", true, 5, true),
+                input("in", false, 1, true),
                 input("inConfig", false, 5, false),
                 output("out"),
                 output("passthrough"),
@@ -630,6 +633,18 @@ mod tests {
             gpio_stream_off: BTreeMap::new(),
         };
         assert_eq!(nop::to_vec(&u), hex("b9 03 bb 00 bb 00 bb 00"));
+        let nn = NeuralNetwork {
+            blob_size: Some(1_000_000),
+            blob_uri: "asset:__blob".into(),
+            num_frames: 8,
+            num_threads: 0,
+            num_nce_per_thread: 0,
+            num_frames_to_skip: 0,
+        };
+        assert_eq!(
+            nop::to_vec(&nn),
+            hex("b9 06 82 40 42 0f 00 bd 0c 61 73 73 65 74 3a 5f 5f 62 6c 6f 62 08 00 00 00")
+        );
         let u = Uvc {
             gpio_init: BTreeMap::from([(58, 1)]),
             ..Default::default()
