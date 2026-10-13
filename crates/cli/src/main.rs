@@ -396,16 +396,23 @@ fn run_session(
     kept: &mut Kept,
     planned: bool,
 ) -> Result<()> {
-    // Always false on Windows (see `Settings::low_power`).
     let low_power = settings.low_power();
+    // In low power mode apps get the camera's own USB video on Linux. On Windows that stalls, so there the video
+    // still comes through here to the virtual camera, only without networks or effects.
+    let mode = match (low_power, cfg!(unix)) {
+        (false, _) => opal_c1::Mode::Full,
+        (true, true) => opal_c1::Mode::Webcam,
+        (true, false) => opal_c1::Mode::Plain,
+    };
+    let webcam = mode == opal_c1::Mode::Webcam;
     // Windows 10 has no virtual camera, so there is nothing to give apps: the camera is left alone.
     #[cfg(windows)]
     if !opal_vcam::host::available() {
         return Err(Wait::Windows10.into());
     }
-    // Opened before the boot, so one that cannot open does not cost a boot. In low power mode apps use the
-    // camera itself, so the virtual camera goes.
-    if low_power {
+    // Opened before the boot, so one that cannot open does not cost a boot. When apps use the camera itself, the
+    // virtual camera goes.
+    if webcam {
         *kept.outputs.locked() = None;
         kept.registration = None;
     } else if kept.outputs.locked().is_none() {
@@ -415,7 +422,7 @@ fn run_session(
             kept.registration = Some(r);
         }
     }
-    let booted = boot(dir, low_power, planned)?;
+    let booted = boot(dir, webcam, planned)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let info = device_info(&dev)?;
     let sensor = &info.sensor;
@@ -424,7 +431,7 @@ fn run_session(
     if matches!(info.usb.as_str(), "low" | "full" | "high") {
         return Err(opal_dai::boot::Error::SlowUsb.into());
     }
-    // Low power mode streams 1080p, as the camera's own USB video has no other size.
+    // Low power mode streams 1080p, the only size the camera's own USB video sends.
     let resolution = if low_power {
         opal_c1::Resolution::P1080
     } else {
@@ -443,7 +450,7 @@ fn run_session(
         dev,
         info,
         dir,
-        (resolution, low_power),
+        (resolution, mode),
         (kept.outputs.clone(), &kept.listener),
         settings,
         overrides,
@@ -491,7 +498,7 @@ fn check_boot_interval() -> Result<()> {
     Ok(())
 }
 
-/// Boots the camera. Its own USB video output is only turned on for low power mode. `planned` is a restart asked
+/// Boots the camera, with its own USB video output on when `usb_video`. `planned` is a restart asked
 /// for (a new resolution or power mode): a camera waiting in its bootloader after the last session is booted right
 /// away, as the camera's own app does, rather than after the spacing kept between other boots.
 fn boot(dir: &Path, usb_video: bool, planned: bool) -> Result<opal_xlink::Found> {
@@ -555,9 +562,9 @@ fn main() -> Result<ExitCode> {
             }
         },
         Command::Webcam { flicker } => {
-            // On Windows the firmware's own USB video stalls; see `Settings::low_power`.
+            // On Windows the camera's own USB video stalls (see `run_session`).
             if cfg!(windows) {
-                anyhow::bail!("low power mode is only on Linux");
+                anyhow::bail!("webcam is only on Linux");
             }
             let _lock = lock_camera()?;
             webcam::run(&dir, &flicker)?;

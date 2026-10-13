@@ -36,8 +36,9 @@ image, which holds the files the camera needs:
   the video off and on, and opens the control panel.
 - **Start at sign-in** (in the control panel or the tray menu) can be turned off. Then open Opal C1 Control and
   choose Start it when the camera is needed.
-- **Low power mode** (Linux, in the control panel) makes the camera a plain webcam with no effects, for less
-  processing. Choose "Opal C1" in applications while it is on. Changing it restarts the camera.
+- **Low power mode** (in the control panel) gives plain 1080p video with no effects, for less processing. On
+  Linux choose "Opal C1" in applications while it is on; on Windows keep "Opal C1 Virtual". Changing it
+  restarts the camera.
 - Settings are kept between sessions. Presets keep a look with its lighting and effects under a name.
 
 ### Several apps at once (Linux)
@@ -62,7 +63,7 @@ Everything in the control panel can also be done with `opal-rs ctl <command>` wh
 | `on`, `off`, `auto` | Force video on or off, or follow apps (the default) |
 | `video off`, `video on` | Show the camera-off picture instead of the video |
 | `resolution 1080p` | `720p`, `1080p`, `1440p` or `2160p`; restarts the camera |
-| `power low`, `power normal` | Low power mode on or off (Linux); restarts the camera |
+| `power low`, `power normal` | Low power mode on or off; restarts the camera |
 | `focus 120`, `af` | Manual focus (0 to 255) or autofocus |
 | `exposure 10000 400`, `ae` | Manual exposure (microseconds, ISO) or auto |
 | `wb 4500`, `awb` | White balance in kelvin, or auto |

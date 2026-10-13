@@ -13,7 +13,7 @@ pub fn run(dir: &Path, flicker: &str) -> Result<()> {
     let booted = crate::boot(dir, true, false)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = crate::sensor_name(&dev)?;
-    let pipeline = opal_c1::pipeline(dir, &sensor, Resolution::P1080, true, banding)?;
+    let pipeline = opal_c1::pipeline(dir, &sensor, Resolution::P1080, opal_c1::Mode::Webcam, banding)?;
     let streams = dev.start_pipeline(&pipeline)?;
     let (control, led) = (
         crate::daemon::stream(&streams, opal_c1::CONTROL_STREAM)?,

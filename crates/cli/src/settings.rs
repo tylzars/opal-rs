@@ -215,10 +215,8 @@ impl Settings {
     }
 
     /// True when low power mode is saved.
-    /// Low power mode is Linux only: on Windows neither the firmware loaded here nor the camera's own serves the
-    /// camera's USB video reliably, so a saved choice from an older version is ignored there.
     pub fn low_power(&self) -> bool {
-        cfg!(unix) && self.commands.get("power").is_some_and(|c| c == "power low")
+        self.commands.get("power").is_some_and(|c| c == "power low")
     }
 
     pub fn commands(&self) -> impl Iterator<Item = &str> {

@@ -206,14 +206,24 @@ pub fn stop_control() -> CameraControl {
     c
 }
 
+/// What the camera runs beside its video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Video to the host, with the networks behind the effects and gestures.
+    Full,
+    /// Low power: video to the host, no networks.
+    Plain,
+    /// Low power: video straight to the camera's own USB video output, no networks.
+    Webcam,
+}
+
 /// Camera video, person segmentation, face detection and hand landmarks to the host over XLink, microphone into UAC,
-/// with control streams. In low power mode the video goes straight to the camera's own USB video output instead,
-/// with no networks.
+/// with control streams. Low power modes have no networks.
 pub fn pipeline(
     asset_dir: &Path,
     sensor: &str,
     res: Resolution,
-    low_power: bool,
+    mode: Mode,
     anti_banding: u8,
 ) -> std::io::Result<Pipeline> {
     let (width, height) = res.size();
@@ -269,7 +279,7 @@ pub fn pipeline(
     let mic_cfg = p.xlink_in(MIC_STREAM, 256);
     p.link(mic_cfg, "out", mic, "inputConfig");
 
-    if low_power {
+    if mode == Mode::Webcam {
         // The LED turns white while an app has the video open.
         let leds = |level| LED_GPIOS.into_iter().map(|g| (g, level)).collect();
         let uvc = p.uvc(&Uvc {
@@ -281,7 +291,8 @@ pub fn pipeline(
     } else {
         let video = p.xlink_out(VIDEO_STREAM, false, 3, -1.0);
         p.link(cam, "video", video, "in");
-
+    }
+    if mode == Mode::Full {
         let (sw, sh) = (SEGMENTATION_WIDTH as i32, SEGMENTATION_HEIGHT as i32);
         let seg_size = p.image_manip(Branch::Segmentation.crop(false), sw * sh * 3, 1);
         p.link(cam, "preview", seg_size, "inputImage");

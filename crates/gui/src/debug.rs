@@ -47,13 +47,14 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
     let c = &mut app.c;
 
     ui.heading("Camera");
-    // Low power mode is Linux only.
-    if cfg!(unix) {
-        if ui.checkbox(&mut c.low_power, "Low power mode").changed() {
-            cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
-        }
-        ui.weak("Apps use the camera directly at 1080p, without effects. Restarts the camera.");
+    if ui.checkbox(&mut c.low_power, "Low power mode").changed() {
+        cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
     }
+    ui.weak(if cfg!(unix) {
+        "Apps use the camera directly at 1080p, without effects. Restarts the camera."
+    } else {
+        "Plain 1080p, no networks on the camera, no effects. Restarts the camera."
+    });
     ui.add_enabled_ui(!c.low_power, |ui| {
         ui.horizontal(|ui| {
             ui.label("Resolution");

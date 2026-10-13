@@ -147,6 +147,12 @@ impl Default for Controls {
 }
 
 impl Controls {
+    /// Low power mode where apps get the camera's own USB video, past the service (Linux; on Windows low power video
+    /// still goes through the service).
+    fn own_video(&self) -> bool {
+        self.low_power && cfg!(unix)
+    }
+
     fn from_settings(saved: &str) -> Self {
         let mut c = Self::default();
         for cmd in saved.split(';').map(str::trim) {
@@ -189,8 +195,7 @@ impl Controls {
                 ["gesture", "peace", g] => c.peace = *g == "on",
                 ["gesture", "pinch", g] => c.pinch = *g == "on",
                 ["lockpause", v] => c.lock_pause = *v == "on",
-                // Low power mode is Linux only.
-                ["power", p] => c.low_power = cfg!(unix) && *p == "low",
+                ["power", p] => c.low_power = *p == "low",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
                 ["antibanding", a] => c.antibanding = (*a).to_owned(),
                 ["magnify", "off"] => c.magnify = 1.0,
@@ -364,9 +369,9 @@ impl App {
         words.next()
     }
 
-    /// Takes frames from the service, or from the camera itself in low power mode.
+    /// Takes frames from the service, or from the camera itself when apps get its own video.
     fn start_preview(&mut self, ctx: &egui::Context) {
-        let source = if self.c.low_power && cfg!(unix) {
+        let source = if self.c.own_video() {
             preview::Source::Device(preview::camera_node(), video_size("1080p"))
         } else {
             preview::Source::Service

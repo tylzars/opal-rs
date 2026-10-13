@@ -24,7 +24,7 @@ power mode on Linux).
 | Stickers | Text, a name card, a clock, a timer or pictures, in front of or behind the person. |
 | Gestures | A peace sign turns the video off and on; a pinch turns face tracking on and off. |
 | Extras | Presets, a short video loop, pixelate, a camera-off picture, preview with zebra stripes and histogram. |
-| Low power | A plain webcam with no effects, for slower computers (Linux). |
+| Low power | Plain 1080p video with no effects, for slower computers. |
 
 The camera only runs while an application uses it, and it stops while the screen is locked. Its light is white
 while it sends video and blue while the video is off.
@@ -33,7 +33,7 @@ while it sends video and blue while the video is off.
 | System | Support |
 | --- | --- |
 | Ubuntu 24.04, Debian 13 or newer | Everything, plus extra virtual cameras so several apps can use the C1 at once. |
-| Windows 11 | Everything except low power mode. |
+| Windows 11 | Everything. |
 | Windows 10 | Not supported: Windows 10 has no virtual cameras. Opal C1 still works there as a plain webcam. |
 
 ## Requirements

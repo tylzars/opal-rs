@@ -233,9 +233,11 @@ struct Session {
     /// Network and crop control streams of each branch, in `Branch::ALL` order; empty in low power mode.
     branches: Vec<(StreamId, StreamId)>,
     crop_in: Option<StreamId>,
-    /// The camera streams straight to apps over USB video, without effects.
+    /// Low power mode: no networks and no effects.
     low_power: bool,
-    /// The camera's own video device, watched for apps in low power mode.
+    /// Apps get the camera's own USB video, past the service (low power mode on Linux).
+    webcam: bool,
+    /// The camera's own video device, watched for apps when `webcam`.
     camera_node: Mutex<Option<PathBuf>>,
     resolution: Resolution,
     /// Whether video goes to an output apps open (else it streams all the time).
@@ -493,8 +495,8 @@ impl Session {
 
     fn update(&self, consumers: Option<usize>) -> Result<()> {
         let mut st = self.state.locked();
-        // Low power video does not pass through the host, so frames are assumed once the camera has had time to start.
-        let started = if self.low_power {
+        // The camera's own USB video does not pass through here, so frames are assumed once it has had time to start.
+        let started = if self.webcam {
             st.last_change.elapsed() >= LOW_POWER_START
         } else {
             self.frames.load(Ordering::Relaxed) > st.start_frames
@@ -701,10 +703,6 @@ impl Session {
             // Compared with the saved choice, not the mode in use: a USB 2 port, Windows 10 or low power mode can
             // keep the camera in another mode, and restarting it would not change that.
             ["power", power @ ("low" | "normal")] => {
-                // On Windows neither the firmware loaded here nor the camera's own serves its USB video reliably.
-                if cfg!(windows) && *power == "low" {
-                    bail!("low power mode is only on Linux");
-                }
                 if (*power == "low") != self.settings.locked().low_power() {
                     RESTART.store(true, Ordering::Relaxed);
                 }
@@ -1425,19 +1423,21 @@ pub fn run(
     dev: Device,
     info: DeviceInfo,
     dir: &Path,
-    (resolution, low_power): (Resolution, bool),
+    (resolution, mode): (Resolution, opal_c1::Mode),
     (outputs, listener): (Arc<Mutex<Option<crate::output::Outputs>>>, &opal_ipc::Listener),
     settings: Settings,
     overrides: &[String],
 ) -> Result<()> {
     let (vw, vh) = resolution.size();
     let has_output = outputs.locked().is_some();
+    let low_power = mode != opal_c1::Mode::Full;
+    let webcam = mode == opal_c1::Mode::Webcam;
 
     if let Some(level) = std::env::var("OPAL_RS_LOG").ok().and_then(|l| log_level(&l)) {
         dev.call("setLogLevel", vec![level.into()])?;
     }
     let banding = crate::mains::mode(settings.antibanding()).unwrap_or(antibanding::HZ_60);
-    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, &info.sensor, resolution, low_power, banding)?)?;
+    let streams = dev.start_pipeline(&opal_c1::pipeline(dir, &info.sensor, resolution, mode, banding)?)?;
     let session = Arc::new(Session {
         link: dev.link().clone(),
         control: stream(&streams, opal_c1::CONTROL_STREAM)?,
@@ -1449,6 +1449,7 @@ pub fn run(
             .collect(),
         crop_in: streams.get(hands::CROP_STREAM).copied(),
         low_power,
+        webcam,
         camera_node: Mutex::new(None),
         resolution,
         has_output,
@@ -1605,7 +1606,7 @@ pub fn run(
                 session.locked.store(locked, Ordering::Relaxed);
             }
         }
-        let users = if low_power {
+        let users = if webcam {
             Some(crate::output::low_power_users(&mut session.camera_node.locked()))
         } else {
             if last_refresh.elapsed() >= REFRESH_PERIOD {
@@ -1627,7 +1628,7 @@ pub fn run(
         };
         // The control panel takes its preview from here rather than from the output, which v4l2loopback lets
         // only one app read.
-        let previewing = !low_power
+        let previewing = !webcam
             && session
                 .state
                 .locked()

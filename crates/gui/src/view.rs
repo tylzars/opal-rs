@@ -416,17 +416,17 @@ fn keep_preview(app: &mut App, ctx: &egui::Context) {
     if app.view.hold.is_some_and(|t| Instant::now() < t) || !app.want_preview {
         return;
     }
-    if app.c.low_power && !app.view.camera_preview {
+    if app.c.own_video() && !app.view.camera_preview {
         if app.preview.running() {
             app.preview.stop();
         }
         return;
     }
     let since = app.preview.since_start();
-    let retry = Duration::from_secs(if app.c.low_power { 10 } else { 3 });
+    let retry = Duration::from_secs(if app.c.own_video() { 10 } else { 3 });
     if app.preview.running() {
         // Only for the service output; the camera itself is left alone.
-        if !app.c.low_power && !app.preview.live() && since.is_some_and(|d| d > Duration::from_secs(8)) {
+        if !app.c.own_video() && !app.preview.live() && since.is_some_and(|d| d > Duration::from_secs(8)) {
             app.preview.stop();
         }
     } else if since.is_none_or(|d| d > retry) {
@@ -501,18 +501,13 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
                 app.apply("video on".into());
             }
         });
-    } else if connected && app.c.low_power && !app.view.camera_preview {
+    } else if connected && app.c.own_video() && !app.view.camera_preview {
         centre(ui, 110.0, &mut |ui| {
             ui.label(
                 egui::RichText::new("Preview is off in low power mode")
                     .size(17.0)
                     .color(TEXT),
             );
-            if cfg!(windows) {
-                // The picture goes from the camera straight to apps, past the service.
-                ui.label(egui::RichText::new("Apps get the picture straight from the camera.").color(WEAK));
-                return;
-            }
             ui.label(egui::RichText::new("Apps cannot use the camera while it shows.").color(WEAK));
             ui.add_space(6.0);
             if theme::primary(ui, "Show preview").clicked() {
@@ -565,7 +560,7 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     }
 
     // In low power mode the preview holds the camera: offer to give it back to apps.
-    if connected && app.c.low_power && app.view.camera_preview {
+    if connected && app.c.own_video() && app.view.camera_preview {
         let r = Rect::from_min_size(rect.right_bottom() + vec2(-140.0, -48.0), vec2(126.0, 34.0));
         if ui.put(r, egui::Button::new("Stop preview")).clicked() {
             app.view.camera_preview = false;
@@ -618,9 +613,10 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     }
 }
 
-/// Which camera to pick in apps. They also list the camera's own "Opal C1", which has video only in low power mode.
+/// Which camera to pick in apps. They also list the camera's own "Opal C1", which has video only in low power mode
+/// on Linux.
 fn camera_hint(app: &App, ui: &mut Ui) {
-    if app.c.low_power || !app.connected {
+    if app.c.own_video() || !app.connected {
         return;
     }
     ui.add_space(8.0);
@@ -1240,16 +1236,12 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
-        // Low power mode is Linux only: on Windows neither the firmware loaded here nor the camera's own serves its
-        // USB video reliably.
-        if cfg!(unix)
-            && theme::switch_row(
-                ui,
-                "Low power mode",
-                "Changing this restarts the camera.",
-                &mut c.low_power,
-            )
-        {
+        if theme::switch_row(
+            ui,
+            "Low power mode",
+            "Changing this restarts the camera.",
+            &mut c.low_power,
+        ) {
             cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
         }
         if let (Some(serial), Some(firmware), Some(usb)) = (&serial, &firmware, &usb) {
@@ -1764,8 +1756,13 @@ const HELP: [(&str, &str); 23] = [
     ),
     (
         "Low power mode",
-        "Applications get the picture straight from the camera at 1080p; choose \"Opal C1\" in them. This uses \
-         less processing, but effects, face tracking and hand gestures are off. Changing it restarts the camera.",
+        if cfg!(unix) {
+            "Applications get the picture straight from the camera at 1080p; choose \"Opal C1\" in them. This uses \
+             less processing, but effects, face tracking and hand gestures are off. Changing it restarts the camera."
+        } else {
+            "Plain 1080p video: every effect is off and the camera does no face or person detection, so face \
+             tracking and hand gestures are off too. Changing it restarts the camera."
+        },
     ),
     (
         "Zebra stripes and histogram",
