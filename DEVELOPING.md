@@ -27,8 +27,8 @@ target/release/opal-rs run --output /dev/video10   # the service, in the foregro
 target/release/opal-rs-gui                         # the control panel, in another terminal
 ```
 To install it for your user instead: `cargo install --path crates/cli` (and `crates/gui`, `crates/tray`), then
-`cp dist/opal-rs.service ~/.config/systemd/user/ && systemctl --user enable --now opal-rs`, and
-`cp dist/opal-rs-tray.desktop ~/.config/autostart/` for the tray icon.
+`cp dist/opal-rs.service ~/.config/systemd/user/ && systemctl --user daemon-reload`, and
+`cp dist/opal-rs-tray.desktop ~/.config/autostart/` for the tray icon, which starts the service at sign-in.
 
 ## Build and run on Windows
 The simplest is to build the installer (below) and run it. By hand:

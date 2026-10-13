@@ -6,7 +6,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, TrayIconBuilder};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage};
 
-use crate::{MODES, Tray, dot, open_panel, send};
+use crate::{MODES, Tray, dot, open_panel, send, toggle_autostart};
 
 fn icon(colour: [u8; 3]) -> Icon {
     let size = 32;
@@ -25,6 +25,7 @@ pub fn run() {
     let video = CheckMenuItem::new("Video on", false, true, None);
     let modes = MODES.map(|(label, _)| CheckMenuItem::new(label, false, false, None));
     let panel = MenuItem::new("Open control panel", true, None);
+    let autostart = CheckMenuItem::new("Start at sign-in", true, opal_ipc::autostart::enabled(), None);
     let hide = MenuItem::new("Hide this icon", true, None);
     let menu = Menu::new();
     let built = menu.append_items(&[
@@ -36,6 +37,7 @@ pub fn run() {
         &modes[2],
         &PredefinedMenuItem::separator(),
         &panel,
+        &autostart,
         &hide,
     ]);
     let mut tray = Tray::default();
@@ -72,6 +74,9 @@ pub fn run() {
                 send(MODES[i].1);
             } else if event.id == panel.id() {
                 open_panel();
+            } else if event.id == autostart.id() {
+                toggle_autostart();
+                autostart.set_checked(opal_ipc::autostart::enabled());
             } else if event.id == hide.id() {
                 return;
             }

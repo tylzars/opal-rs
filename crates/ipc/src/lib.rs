@@ -4,6 +4,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod autostart;
+
 #[cfg(unix)]
 type Inner = std::os::unix::net::UnixStream;
 #[cfg(not(unix))]

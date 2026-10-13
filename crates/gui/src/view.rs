@@ -131,6 +131,8 @@ pub struct State {
     #[cfg(unix)]
     cameras: crate::cameras::Card,
     loop_bounce: bool,
+    /// Starts at sign-in, as last read or set.
+    autostart: bool,
 }
 
 impl State {
@@ -178,6 +180,7 @@ impl State {
             #[cfg(unix)]
             cameras: Default::default(),
             loop_bounce: false,
+            autostart: opal_ipc::autostart::enabled(),
         }
     }
 
@@ -315,7 +318,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     .auto_shrink(false)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width() - 12.0);
-                        settings(app, ui, &mut cmds);
+                        // Only a running camera session takes settings; the stage says why there is none.
+                        ui.add_enabled_ui(app.connected, |ui| settings(app, ui, &mut cmds));
+                        panel_settings(app, ui);
                         ui.add_space(18.0);
                     });
             });
@@ -356,8 +361,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 .show(ui, |ui| {
                     column(ui, left, w, |ui| {
                         // Only a running camera session takes settings; the stage above says why there is none.
-                        let live = app.connected;
-                        ui.add_enabled_ui(live, |ui| settings(app, ui, &mut cmds));
+                        ui.add_enabled_ui(app.connected, |ui| settings(app, ui, &mut cmds));
+                        panel_settings(app, ui);
                         ui.add_space(16.0);
                     });
                 });
@@ -519,7 +524,12 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
             let (title, detail) = opal_ipc::waiting_text(code);
             (title, detail.to_owned())
         } else if !connected {
-            ("The camera service is not running", "It starts at sign-in.".to_owned())
+            let when = if app.view.autostart {
+                "It starts at sign-in."
+            } else {
+                "Start at sign-in is off."
+            };
+            ("The camera service is not running", when.to_owned())
         } else if !app.want_preview {
             ("Preview paused", String::new())
         } else if app.preview.error().is_some() {
@@ -908,6 +918,15 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             }
         });
     });
+    device(app, ui, cmds);
+    if let Some(m) = message {
+        app.message = m;
+    }
+}
+
+/// The panel's own choices, which work without a camera session.
+fn panel_settings(app: &mut App, ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.y = 10.0;
     card(ui, "", |ui| {
         let (mut zebra, mut histogram) = (app.zebra, app.histogram);
         let a = theme::switch_row(
@@ -927,16 +946,26 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             crate::overlay::save(zebra, histogram);
         }
     });
-    device(app, ui, cmds);
+    card(ui, "", |ui| {
+        let v = &mut app.view;
+        if theme::switch_row(
+            ui,
+            "Start at sign-in",
+            "Starts Opal C1 and its tray icon.",
+            &mut v.autostart,
+        ) {
+            if let Err(e) = opal_ipc::autostart::set(v.autostart, &opal_ipc::program("opal-rs-tray")) {
+                app.message = format!("Start at sign-in: {e}");
+            }
+            v.autostart = opal_ipc::autostart::enabled();
+        }
+    });
     if link_card(ui, "Help", Arrow::Right) {
         app.view.help = true;
         app.view.help_top = true;
     }
     if link_card(ui, "Debug mode", Arrow::Right) {
         app.debug = true;
-    }
-    if let Some(m) = message {
-        app.message = m;
     }
 }
 
@@ -1644,7 +1673,7 @@ fn lighting_cards(c: &mut Controls, v: &mut State, ui: &mut Ui, cmds: &mut Vec<S
 }
 
 /// What each setting does, in a few words.
-const HELP: [(&str, &str); 22] = [
+const HELP: [(&str, &str); 23] = [
     (
         "Zoom",
         "Zooms into the middle of the picture. Face tracking takes over while it is on.",
@@ -1742,6 +1771,11 @@ const HELP: [(&str, &str); 22] = [
         "Zebra stripes and histogram",
         "Help with exposure. Stripes mark parts of the preview that are too bright to show detail, and the \
          histogram shows how much of the picture is dark (left) or bright (right). Only the preview shows them.",
+    ),
+    (
+        "Start at sign-in",
+        "Opal C1 starts in the background at sign-in, with an icon in the tray. When this is off, open Opal C1 \
+         Control and choose Start it.",
     ),
     (
         "Debug mode",

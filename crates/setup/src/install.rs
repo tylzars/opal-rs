@@ -23,7 +23,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, Interface, PCWSTR};
 
 const TITLE: &str = "Opal C1 setup";
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\opal-rs";
 const SETUP: &str = "opal-rs-setup.exe";
 /// A program that was just stopped holds its file for a moment, so a busy file is tried again for this long.
@@ -78,6 +77,7 @@ const USER_ASKS: &str = "--user-asks";
 pub fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let uninstall = args.first().is_some_and(|a| a == "uninstall");
+    let fresh = !install_dir().join("opal-rs-tray.exe").exists();
     if !unsafe { IsUserAnAdmin() }.as_bool() {
         // Runs again as administrator, which can be another account, so this copy stops this user's service, and
         // afterwards asks about this user's data or starts the programs as this user.
@@ -88,8 +88,11 @@ pub fn main() {
             USER_ASKS.to_owned()
         };
         match (run_as_admin(&args), uninstall) {
-            (true, true) => remove_data(),
-            (true, false) => offer_start(&install_dir()),
+            (true, true) => {
+                stop_autostart();
+                remove_data();
+            }
+            (true, false) => offer_start(&install_dir(), fresh),
             // Cancelled or failed: put back what was running.
             (false, _) if was_running => {
                 let _ = opal_ipc::start_service_with(&install_dir().join("opal-rs.exe"));
@@ -102,7 +105,7 @@ pub fn main() {
     let result = if uninstall {
         remove(!user_asks)
     } else {
-        install(!user_asks)
+        install(!user_asks, fresh)
     };
     if let Err(e) = result {
         message(&e, MB_OK | MB_ICONERROR);
@@ -136,7 +139,7 @@ fn run_as_admin(args: &str) -> bool {
 }
 
 /// Installs; with `ask_start`, also offers to start the programs (when no user copy will).
-fn install(ask_start: bool) -> Result<(), String> {
+fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
     let dir = install_dir();
     let source = std::env::current_exe().map_err(|e| e.to_string())?;
     let source_dir = source.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -205,8 +208,6 @@ fn install(ask_start: bool) -> Result<(), String> {
             code.code().unwrap_or(-1)
         ));
     }
-    let tray = dir.join("opal-rs-tray.exe");
-    set_string(RUN_KEY, "opal-rs", &format!("\"{}\"", tray.display()))?;
     set_string(UNINSTALL_KEY, "DisplayName", "Opal C1 (opal-rs)")?;
     set_string(UNINSTALL_KEY, "DisplayVersion", env!("CARGO_PKG_VERSION"))?;
     set_string(UNINSTALL_KEY, "Publisher", "opal-rs")?;
@@ -227,13 +228,17 @@ fn install(ask_start: bool) -> Result<(), String> {
         eprintln!("Start menu entry: {e}");
     }
     if ask_start {
-        offer_start(&dir);
+        offer_start(&dir, fresh);
     }
     Ok(())
 }
 
-/// Says it is installed and offers to start the tray and the control panel, as whoever runs this.
-fn offer_start(dir: &Path) {
+/// Says it is installed and offers to start the tray and the control panel, as whoever runs this. A `fresh` install
+/// starts at sign-in for this account; an update keeps the account's choice.
+fn offer_start(dir: &Path, fresh: bool) {
+    if fresh && let Err(e) = opal_ipc::autostart::set(true, &dir.join("opal-rs-tray.exe")) {
+        eprintln!("start at sign-in: {e}");
+    }
     // The virtual camera is registered anyway, so it appears once Windows is upgraded.
     let windows10 = if opal_vcam::host::available() {
         ""
@@ -247,8 +252,13 @@ fn offer_start(dir: &Path) {
     } else {
         ""
     };
+    let at_sign_in = if opal_ipc::autostart::enabled() {
+        " and starts at sign-in"
+    } else {
+        ""
+    };
     let start = message(
-        &format!("Opal C1 is installed and starts at sign-in.{windows10}\n\nStart it now?{ask}"),
+        &format!("Opal C1 is installed{at_sign_in}.{windows10}\n\nStart it now?{ask}"),
         MB_YESNO | MB_ICONINFORMATION,
     );
     if start {
@@ -270,7 +280,6 @@ fn remove(ask_data: bool) -> Result<(), String> {
         .arg(dir.join("opal_vcam.dll"))
         .status();
     unsafe {
-        let _ = RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, &HSTRING::from(RUN_KEY), &HSTRING::from("opal-rs"));
         let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, &HSTRING::from(UNINSTALL_KEY));
     }
     let _ = std::fs::remove_file(shortcut());
@@ -284,9 +293,15 @@ fn remove(ask_data: bool) -> Result<(), String> {
     delete_at_restart(&dir.join(SETUP));
     delete_at_restart(&dir);
     if ask_data {
+        stop_autostart();
         remove_data();
     }
     Ok(())
+}
+
+/// Stops this account starting the removed tray at sign-in.
+fn stop_autostart() {
+    let _ = opal_ipc::autostart::set(false, Path::new(""));
 }
 
 /// Offers to delete this account's settings, presets, stickers and camera files.

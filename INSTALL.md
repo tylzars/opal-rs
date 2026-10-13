@@ -7,8 +7,8 @@ Ubuntu 24.04, Debian 13 or newer. Other Linux systems: see [DEVELOPING.md](DEVEL
 ```shell
 sudo apt install ./opal-rs_1.0.0-1_amd64.deb
 ```
-Then log out and back in (or restart, after installing `v4l2loopback-dkms`). The camera service and the tray
-icon start by themselves.
+Then log out and back in (or restart, after installing `v4l2loopback-dkms`). The tray icon starts at sign-in and
+starts the camera service.
 
 The "Opal C1 Virtual" camera uses the kernel's `v4l2loopback` module, which Ubuntu 24.04 includes. If the install
 says the kernel has none, also install `v4l2loopback-dkms`; with Secure Boot on, that asks for a password to be set
@@ -34,6 +34,8 @@ image, which holds the files the camera needs:
   locked. Its light is white while it sends video.
 - **Opal C1 Control** shows a preview and has every setting. The **tray icon** shows when the camera is on, turns
   the video off and on, and opens the control panel.
+- **Start at sign-in** (in the control panel or the tray menu) can be turned off. Then open Opal C1 Control and
+  choose Start it when the camera is needed.
 - **Low power mode** (Linux, in the control panel) makes the camera a plain webcam with no effects, for less
   processing. Choose "Opal C1" in applications while it is on. Changing it restarts the camera.
 - Settings are kept between sessions. Presets keep a look with its lighting and effects under a name.

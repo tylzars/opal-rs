@@ -104,6 +104,14 @@ fn open_panel() {
     }
 }
 
+/// Switches starting at sign-in.
+fn toggle_autostart() {
+    let on = !opal_ipc::autostart::enabled();
+    if let Err(e) = opal_ipc::autostart::set(on, &opal_ipc::program("opal-rs-tray")) {
+        eprintln!("start at sign-in: {e}");
+    }
+}
+
 #[cfg(unix)]
 impl ksni::Tray for Tray {
     fn id(&self) -> String {
@@ -181,6 +189,13 @@ impl ksni::Tray for Tray {
             StandardItem {
                 label: "Open control panel".into(),
                 activate: Box::new(|_: &mut Self| open_panel()),
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: "Start at sign-in".into(),
+                checked: opal_ipc::autostart::enabled(),
+                activate: Box::new(|_: &mut Self| toggle_autostart()),
                 ..Default::default()
             }
             .into(),
