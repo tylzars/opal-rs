@@ -55,7 +55,8 @@ impl Cube {
                 ["LUT_1D_SIZE", ..] => return Err(Error::OneDimensional),
                 ["LUT_3D_SIZE", s] => {
                     size = s.parse().map_err(|_| Error::Parse(n, format!("bad size {s}")))?;
-                    if !(2..=256).contains(&size) {
+                    // 129 points is far finer than any look needs; bigger tables only cost memory and time.
+                    if !(2..=129).contains(&size) {
                         return Err(Error::Parse(n, format!("bad size {size}")));
                     }
                 }
@@ -65,6 +66,12 @@ impl Cube {
                 values => {
                     if size == 0 {
                         return Err(Error::Parse(n, "data before LUT_3D_SIZE".into()));
+                    }
+                    if data.len() == size * size * size {
+                        return Err(Error::Size {
+                            expected: size * size * size,
+                            found: data.len() + 1,
+                        });
                     }
                     data.push(floats(values, n)?);
                 }

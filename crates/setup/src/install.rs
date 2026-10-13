@@ -4,16 +4,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
 use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
-    RegDeleteKeyValueW, RegDeleteTreeW, RegSetValueExW,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_MULTI_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
-use windows::Win32::UI::Shell::{IShellLinkW, IsUserAnAdmin, ShellExecuteW, ShellLink};
+use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+use windows::Win32::UI::Shell::{
+    IShellLinkW, IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW, ShellLink,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
 };
@@ -68,31 +71,72 @@ fn shortcut() -> PathBuf {
         .join("Microsoft\\Windows\\Start Menu\\Programs\\Opal C1 Control.lnk")
 }
 
+/// Tells the administrator copy that the signed-in user's copy deals with that user: their data, and starting the
+/// programs as them.
+const USER_ASKS: &str = "--user-asks";
+
 pub fn main() {
-    let uninstall = std::env::args().nth(1).as_deref() == Some("uninstall");
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let uninstall = args.first().is_some_and(|a| a == "uninstall");
     if !unsafe { IsUserAnAdmin() }.as_bool() {
-        // Asks for administrator rights and runs again.
-        let exe = std::env::current_exe().unwrap_or_default();
-        let args = if uninstall { "uninstall" } else { "" };
-        unsafe {
-            ShellExecuteW(
-                None,
-                &HSTRING::from("runas"),
-                &HSTRING::from(exe.as_os_str()),
-                &HSTRING::from(args),
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            );
+        // Runs again as administrator, which can be another account, so this copy stops this user's service, and
+        // afterwards asks about this user's data or starts the programs as this user.
+        let was_running = quit_service();
+        let args = if uninstall {
+            format!("uninstall {USER_ASKS}")
+        } else {
+            USER_ASKS.to_owned()
+        };
+        match (run_as_admin(&args), uninstall) {
+            (true, true) => remove_data(),
+            (true, false) => offer_start(&install_dir()),
+            // Cancelled or failed: put back what was running.
+            (false, _) if was_running => {
+                let _ = opal_ipc::start_service_with(&install_dir().join("opal-rs.exe"));
+            }
+            (false, _) => {}
         }
         return;
     }
-    let result = if uninstall { remove() } else { install() };
+    let user_asks = args.iter().any(|a| a == USER_ASKS);
+    let result = if uninstall {
+        remove(!user_asks)
+    } else {
+        install(!user_asks)
+    };
     if let Err(e) = result {
         message(&e, MB_OK | MB_ICONERROR);
+        std::process::exit(1);
     }
 }
 
-fn install() -> Result<(), String> {
+/// Runs this program again as administrator and waits for it. True if it succeeded.
+fn run_as_admin(args: &str) -> bool {
+    let exe = HSTRING::from(std::env::current_exe().unwrap_or_default().as_os_str());
+    let (verb, params) = (HSTRING::from("runas"), HSTRING::from(args));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(exe.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe {
+        if ShellExecuteExW(&mut info).is_err() || info.hProcess.is_invalid() {
+            return false;
+        }
+        WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 1;
+        let _ = GetExitCodeProcess(info.hProcess, &mut code);
+        let _ = CloseHandle(info.hProcess);
+        code == 0
+    }
+}
+
+/// Installs; with `ask_start`, also offers to start the programs (when no user copy will).
+fn install(ask_start: bool) -> Result<(), String> {
     let dir = install_dir();
     let source = std::env::current_exe().map_err(|e| e.to_string())?;
     let source_dir = source.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -105,7 +149,7 @@ fn install() -> Result<(), String> {
             None => std::fs::copy(source_dir.join(name), &to).map(drop),
         };
         let start = Instant::now();
-        let written = loop {
+        let mut written = loop {
             match write() {
                 Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) && start.elapsed() < BUSY_WAIT => {
                     std::thread::sleep(Duration::from_millis(250))
@@ -113,6 +157,26 @@ fn install() -> Result<(), String> {
                 r => break r,
             }
         };
+        let busy = |w: &std::io::Result<()>| w.as_ref().is_err_and(|e| e.raw_os_error() == Some(SHARING_VIOLATION));
+        // Windows' camera service keeps the old camera loaded. Stop it so the new one is used at once; it starts
+        // again by itself when an app next opens a camera.
+        if busy(&written) && name == "opal_vcam.dll" {
+            stop_frame_server();
+            let start = Instant::now();
+            while busy(&written) && start.elapsed() < BUSY_WAIT {
+                std::thread::sleep(Duration::from_millis(250));
+                written = write();
+            }
+        }
+        // Still loaded somewhere: a loaded file can be renamed. Move it aside, delete it at the next restart and
+        // write the new one.
+        if busy(&written) && name == "opal_vcam.dll" {
+            let old = dir.join(format!("opal_vcam.{}.old", std::process::id()));
+            if std::fs::rename(&to, &old).is_ok() {
+                delete_at_restart(&old);
+                written = write();
+            }
+        }
         if let Err(e) = written {
             return Err(if name == "opal_vcam.dll" {
                 format!(
@@ -127,6 +191,8 @@ fn install() -> Result<(), String> {
     if source != dir.join(SETUP) {
         std::fs::copy(&source, dir.join(SETUP)).map_err(|e| format!("Cannot copy the installer: {e}"))?;
     }
+    // An uninstall since the last restart may have left these files to be deleted then.
+    keep_at_restart(&dir);
     let dll = dir.join("opal_vcam.dll");
     let code = Command::new(windows_program("System32\\regsvr32.exe"))
         .arg("/s")
@@ -160,32 +226,43 @@ fn install() -> Result<(), String> {
     if let Err(e) = make_shortcut(&dir.join("opal-rs-gui.exe"), &shortcut()) {
         eprintln!("Start menu entry: {e}");
     }
-    // Registered anyway, so the camera appears once Windows is upgraded.
+    if ask_start {
+        offer_start(&dir);
+    }
+    Ok(())
+}
+
+/// Says it is installed and offers to start the tray and the control panel, as whoever runs this.
+fn offer_start(dir: &Path) {
+    // The virtual camera is registered anyway, so it appears once Windows is upgraded.
     let windows10 = if opal_vcam::host::available() {
         ""
     } else {
-        "\n\nThis Windows has no virtual camera (Windows 11 is needed), so apps get the camera's own picture, \
-         without effects."
+        "\n\nopal-rs needs Windows 11. On this PC Opal C1 works as a plain webcam: in applications, choose \"Opal C1\"."
+    };
+    let first_run =
+        std::env::var_os("LOCALAPPDATA").is_some_and(|d| !PathBuf::from(d).join("opal-rs\\assets").exists());
+    let ask = if first_run {
+        " It will ask for Opal Composer first."
+    } else {
+        ""
     };
     let start = message(
-        &format!(
-            "Opal C1 is installed. It starts when you sign in.{windows10}\n\nStart it now? The control panel will \
-             ask for the Opal Composer disk image the first time."
-        ),
+        &format!("Opal C1 is installed and starts at sign-in.{windows10}\n\nStart it now?{ask}"),
         MB_YESNO | MB_ICONINFORMATION,
     );
     if start {
-        // Explorer starts them as the signed-in user rather than as administrator.
+        // Explorer starts them unelevated, as the signed-in user, even when this copy runs as administrator.
         for program in ["opal-rs-tray.exe", "opal-rs-gui.exe"] {
             let _ = Command::new(windows_program("explorer.exe"))
                 .arg(dir.join(program))
                 .spawn();
         }
     }
-    Ok(())
 }
 
-fn remove() -> Result<(), String> {
+/// Removes the programs; with `ask_data`, also offers to delete this account's settings and camera files.
+fn remove(ask_data: bool) -> Result<(), String> {
     let dir = install_dir();
     stop_running();
     let _ = Command::new(windows_program("System32\\regsvr32.exe"))
@@ -206,6 +283,14 @@ fn remove() -> Result<(), String> {
     // The installer is running from the folder, so it and the folder go at the next restart.
     delete_at_restart(&dir.join(SETUP));
     delete_at_restart(&dir);
+    if ask_data {
+        remove_data();
+    }
+    Ok(())
+}
+
+/// Offers to delete this account's settings, presets, stickers and camera files.
+fn remove_data() {
     let data: Vec<PathBuf> = ["APPDATA", "LOCALAPPDATA"]
         .iter()
         .filter_map(|v| Some(PathBuf::from(std::env::var_os(v)?).join("opal-rs")))
@@ -213,7 +298,7 @@ fn remove() -> Result<(), String> {
         .collect();
     if !data.is_empty()
         && message(
-            "Opal C1 is removed.\n\nAlso delete your settings, presets, stickers and the camera files copied from \
+            "Opal C1 is removed.\n\nAlso delete settings, presets, stickers and the camera files copied from \
              Opal Composer?",
             MB_YESNO | MB_ICONINFORMATION,
         )
@@ -224,20 +309,45 @@ fn remove() -> Result<(), String> {
             }
         }
     }
-    Ok(())
 }
 
-/// Asks a running service to quit, then ends the tray, the panel and anything left.
-fn stop_running() {
-    if opal_ipc::request("quit", Duration::from_secs(3)).is_ok() {
+/// Asks this account's service to stop and waits for it to exit: it stops the camera first, which takes some
+/// seconds after it stops answering. True if it was running.
+fn quit_service() -> bool {
+    let running_now = opal_ipc::request("quit", Duration::from_secs(3)).is_ok();
+    if running_now {
         let start = Instant::now();
-        while opal_ipc::request("status", Duration::from_secs(1)).is_ok() && start.elapsed() < Duration::from_secs(20) {
+        while running("opal-rs.exe") && start.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(500));
         }
     }
+    running_now
+}
+
+/// Whether a program of this name runs, for any account.
+fn running(name: &str) -> bool {
+    let mut c = Command::new(windows_program("System32\\tasklist.exe"));
+    c.args(["/NH", "/FI", &format!("IMAGENAME eq {name}")]);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
+    c.output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(name))
+}
+
+fn stop_running() {
+    let _ = quit_service();
     for name in ["opal-rs-tray.exe", "opal-rs-gui.exe", "opal-rs.exe"] {
         let mut c = Command::new(windows_program("System32\\taskkill.exe"));
         c.args(["/F", "/IM", name]);
+        std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
+        let _ = c.output();
+    }
+}
+
+/// Stops Windows' camera service and its monitor, which hold the virtual camera's DLL while loaded.
+fn stop_frame_server() {
+    for service in ["FrameServerMonitor", "FrameServer"] {
+        let mut c = Command::new(windows_program("System32\\sc.exe"));
+        c.args(["stop", service]);
         std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
         let _ = c.output();
     }
@@ -257,6 +367,61 @@ fn delete_at_restart(path: &Path) {
             PCWSTR::null(),
             MOVEFILE_DELAY_UNTIL_REBOOT,
         );
+    }
+}
+
+const SESSION_MANAGER: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+const PENDING: &str = "PendingFileRenameOperations";
+
+/// Takes `dir` and the files in it off the list of deletes Windows does at the next restart.
+fn keep_at_restart(dir: &Path) {
+    let read = |data: Option<&mut [u16]>| {
+        let mut bytes = data.as_ref().map_or(0, |d| (d.len() * 2) as u32);
+        let r = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                &HSTRING::from(SESSION_MANAGER),
+                &HSTRING::from(PENDING),
+                RRF_RT_REG_MULTI_SZ,
+                None,
+                data.map(|d| d.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        (r == ERROR_SUCCESS).then_some(bytes as usize / 2)
+    };
+    let Some(len) = read(None) else { return };
+    let mut data = vec![0u16; len];
+    let Some(len) = read(Some(&mut data)) else { return };
+    data.truncate(len);
+    // Strings each end in a zero and the list in one more; an empty string is a delete's target.
+    if !data.ends_with(&[0, 0]) {
+        return;
+    }
+    let entries: Vec<String> = data[..data.len() - 2]
+        .split(|c| *c == 0)
+        .map(String::from_utf16_lossy)
+        .collect();
+    let Some(kept) = crate::pending::without_deletes_in(&entries, &dir.display().to_string()) else {
+        return;
+    };
+    if kept.is_empty() {
+        let _ = unsafe {
+            RegDeleteKeyValueW(
+                HKEY_LOCAL_MACHINE,
+                &HSTRING::from(SESSION_MANAGER),
+                &HSTRING::from(PENDING),
+            )
+        };
+        return;
+    }
+    let mut out: Vec<u16> = kept.iter().flat_map(|s| s.encode_utf16().chain([0])).collect();
+    out.push(0);
+    let Ok(hkey) = open_key(SESSION_MANAGER) else { return };
+    let bytes = unsafe { std::slice::from_raw_parts(out.as_ptr().cast::<u8>(), out.len() * 2) };
+    unsafe {
+        let _ = RegSetValueExW(hkey, &HSTRING::from(PENDING), None, REG_MULTI_SZ, Some(bytes));
+        let _ = RegCloseKey(hkey);
     }
 }
 

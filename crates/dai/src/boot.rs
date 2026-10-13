@@ -18,47 +18,36 @@ pub enum Error {
     Missing(State),
     #[error("bootloader {0} is too old to boot from RAM")]
     OldBootloader(Version),
+    /// Booting is refused: the camera has stopped soon after starting on USB 2.
+    #[error("the camera is connected over USB 2")]
+    SlowUsb,
 }
 
+/// Boot progress. The `&str`s are the USB speed of the camera at that step.
 pub enum Step {
-    Rebooting,
-    Bootloader(Version, i32),
+    Rebooting(&'static str),
+    Bootloader(Version, i32, &'static str),
     Sending(usize),
-    Booted,
+    Booted(&'static str),
 }
 
-/// Boots `firmware` with `config` and returns the device once it is running.
-///
-/// If the bootloader drops away mid-boot (it times out and starts the application in flash), the camera is taken
-/// again once, so it is not left cycling between the two.
+/// Boots `firmware` with `config` and returns the device once it is running. A failed boot is not retried here:
+/// every boot drops the camera off USB, so the caller spaces boots out. Nothing is sent to a running camera on USB 2.
 pub fn boot(
     device: &Found,
     config: &BoardConfig,
     firmware: &[u8],
     mut on_step: impl FnMut(Step),
 ) -> Result<Found, Error> {
-    let first = match boot_once(device, config, firmware, &mut on_step) {
-        Ok(f) => return Ok(f),
-        Err(e) => e,
-    };
-    let serial = device.serial().unwrap_or_default().to_owned();
-    let again = bootloader::wait_for(&serial, State::Bootloader, Duration::from_secs(15))
-        .or_else(|| bootloader::wait_for(&serial, State::FlashBooted, Duration::from_secs(1)))
-        .ok_or(first)?;
-    boot_once(&again, config, firmware, &mut on_step)
-}
-
-fn boot_once(
-    device: &Found,
-    config: &BoardConfig,
-    firmware: &[u8],
-    on_step: &mut impl FnMut(Step),
-) -> Result<Found, Error> {
+    if device.slow_usb() {
+        return Err(Error::SlowUsb);
+    }
     let serial = device.serial().unwrap_or_default().to_owned();
     let device = match device.state {
-        // Booted is an application left running by an earlier session.
+        // Booted is firmware left running when the last session stopped. Both are taken over as the camera's own
+        // app does.
         State::FlashBooted | State::Booted => {
-            on_step(Step::Rebooting);
+            on_step(Step::Rebooting(device.usb_speed()));
             bootloader::reboot_to_bootloader(&device.info)?;
             bootloader::wait_for(&serial, State::Bootloader, Duration::from_secs(5))
                 .ok_or(Error::Missing(State::Bootloader))?
@@ -82,7 +71,7 @@ fn boot_once(
         return Err(Error::OldBootloader(version));
     }
     let kind = bl.kind()?;
-    on_step(Step::Bootloader(version, kind));
+    on_step(Step::Bootloader(version, kind, device.usb_speed()));
 
     let image = boot_image(config, firmware);
     on_step(Step::Sending(image.len()));
@@ -90,6 +79,6 @@ fn boot_once(
 
     let booted =
         bootloader::wait_for(&serial, State::Booted, Duration::from_secs(10)).ok_or(Error::Missing(State::Booted))?;
-    on_step(Step::Booted);
+    on_step(Step::Booted(booted.usb_speed()));
     Ok(booted)
 }

@@ -3,6 +3,8 @@
 
 #[cfg(windows)]
 mod install;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pending;
 
 #[cfg(windows)]
 fn main() {

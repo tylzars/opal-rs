@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use opal_dai::pipeline::ImageManipConfig;
 
 /// NN config messages that pause or resume palm detection.
-pub const PALM_CONTROL_STREAM: &str = "ctrlPalm";
+pub const PALM_CONTROL_STREAM: &str = "palmNet";
 /// Palm detector output: `classificators` [896] and `regressors` [896, 18].
 pub const PALM_STREAM: &str = "palm";
 /// Crop configs for the landmark network, one per request.
@@ -29,18 +29,21 @@ const LANDMARK_SCALE: f32 = 2.0;
 const LANDMARK_SHIFT: f32 = 0.1;
 
 /// Anchor centres of the palm detector, in the order of its outputs.
-fn anchors() -> Vec<(f32, f32)> {
-    // Feature maps of 16x16 with 2 anchors per cell and 8x8 with 6.
-    let mut a = Vec::with_capacity(896);
-    for (size, per_cell) in [(16usize, 2usize), (8, 6)] {
-        for y in 0..size {
-            for x in 0..size {
-                let c = ((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
-                a.extend(std::iter::repeat_n(c, per_cell));
+fn anchors() -> &'static [(f32, f32)] {
+    static ANCHORS: std::sync::OnceLock<Vec<(f32, f32)>> = std::sync::OnceLock::new();
+    ANCHORS.get_or_init(|| {
+        // Feature maps of 16x16 with 2 anchors per cell and 8x8 with 6.
+        let mut a = Vec::with_capacity(896);
+        for (size, per_cell) in [(16usize, 2usize), (8, 6)] {
+            for y in 0..size {
+                for x in 0..size {
+                    let c = ((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
+                    a.extend(std::iter::repeat_n(c, per_cell));
+                }
             }
         }
-    }
-    a
+        a
+    })
 }
 
 /// Square region around a hand, in pixels of the frames the hand networks see.
@@ -87,6 +90,7 @@ impl View {
         let (best, &logit) = scores[..anchors.len()]
             .iter()
             .enumerate()
+            .filter(|(_, s)| s.is_finite())
             .max_by(|a, b| a.1.total_cmp(b.1))?;
         if 1.0 / (1.0 + (-logit.clamp(-100.0, 100.0)).exp()) < PALM_MIN {
             return None;
@@ -101,12 +105,14 @@ impl View {
         let (w, h) = (r[2] / n * side, r[3] / n * side);
         let rotation = upright(point(4), point(8));
         let palm = w.max(h);
-        Some(HandBox {
+        let b = HandBox {
             cx: cx + PALM_SHIFT * palm * rotation.sin(),
             cy: cy - PALM_SHIFT * palm * rotation.cos(),
             size: PALM_SCALE * palm,
             rotation,
-        })
+        };
+        // The box becomes a crop the camera runs; never send it one that is not a number.
+        ([b.cx, b.cy, b.size, b.rotation].iter().all(|v| v.is_finite()) && b.size > 0.0).then_some(b)
     }
 
     /// Crop of `b` for the landmark network.
@@ -122,7 +128,7 @@ impl View {
 
     /// The hand in landmark output for the crop of `b`: score, handedness and 63 values (x, y, z in crop pixels).
     pub fn hand(&self, b: &HandBox, score: f32, handedness: f32, raw: &[f32]) -> Option<Hand> {
-        if score < HAND_MIN || raw.len() < 63 {
+        if !score.is_finite() || score < HAND_MIN || raw.len() < 63 || !raw[..63].iter().all(|v| v.is_finite()) {
             return None;
         }
         let (c, s) = (b.rotation.cos(), b.rotation.sin());
@@ -145,10 +151,9 @@ impl View {
 /// Wrist, thumb base and the first two joints of each finger: the landmarks the next crop is sized from.
 const PALM_POINTS: [usize; 12] = [0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18];
 
-/// Box for the next landmark crop, following the hand from its landmarks.
-pub fn follow(hand: &Hand) -> HandBox {
+/// Box for the next landmark crop, following the hand from its landmarks. None if the landmarks give no usable box.
+pub fn follow(hand: &Hand) -> Option<HandBox> {
     let pts: Vec<(f32, f32)> = PALM_POINTS.iter().map(|&i| hand.pixels[i]).collect();
-    let pts = &pts;
     let p = &hand.pixels;
     let knuckles = (
         0.25 * (p[INDEX_BASE].0 + p[RING_BASE].0) + 0.5 * p[MIDDLE_BASE].0,
@@ -166,12 +171,14 @@ pub fn follow(hand: &Hand) -> HandBox {
     let (v0, v1) = range(&mut pts.iter().map(|p| -(p.0 - mx) * s + (p.1 - my) * c));
     let size = LANDMARK_SCALE * (u1 - u0).max(v1 - v0);
     let (uc, vc) = ((u0 + u1) / 2.0, (v0 + v1) / 2.0 - LANDMARK_SHIFT * (v1 - v0));
-    HandBox {
+    let b = HandBox {
         cx: mx + uc * c - vc * s,
         cy: my + uc * s + vc * c,
         size,
         rotation,
-    }
+    };
+    // Sent to the camera as a crop, like the palm box: never one that is not a number or has no size.
+    ([b.cx, b.cy, b.size, b.rotation].iter().all(|v| v.is_finite()) && b.size > 0.0).then_some(b)
 }
 
 /// A hand: landmark positions normalised to the frame (0 to 1), wrist first, in the usual 21-point order.
@@ -192,9 +199,10 @@ pub enum Gesture {
     Pinch,
 }
 
-/// Wrist, then finger tip and middle joint of the index, middle, ring and little fingers.
+/// Landmark numbers in the 21-point hand.
 const WRIST: usize = 0;
 const THUMB_TIP: usize = 4;
+/// Tip and middle joint of the index, middle, ring and little fingers.
 const FINGERS: [(usize, usize); 4] = [(8, 6), (12, 10), (16, 14), (20, 18)];
 const INDEX_BASE: usize = 5;
 const MIDDLE_BASE: usize = 9;
@@ -358,7 +366,7 @@ mod tests {
         let h = view.hand(&b, 0.9, 0.5, &raw).unwrap();
         assert!((h.pixels[5].0 - 320.0).abs() < 1e-3 && (h.pixels[5].1 - 180.0).abs() < 1e-3);
         assert!((h.points[5].0 - 0.5).abs() < 1e-5);
-        assert!((follow(&h).rotation - 0.3).abs() < 1e-4);
+        assert!((follow(&h).unwrap().rotation - 0.3).abs() < 1e-4);
         assert!(view.hand(&b, 0.1, 0.5, &raw).is_none());
         let crop = view.crop(&b);
         assert_eq!(

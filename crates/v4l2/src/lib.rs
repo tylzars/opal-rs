@@ -97,6 +97,15 @@ impl Default for Format {
     }
 }
 
+// Layouts of the kernel's structs on 64-bit Linux; a mismatch fails the build rather than the ioctl.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+    size_of::<PixFormat>() == 48
+        && size_of::<Format>() == 208
+        && size_of::<RequestBuffers>() == 20
+        && size_of::<Buffer>() == 88
+);
+
 const fn ioc(dir: u32, nr: u32, size: usize) -> libc::c_ulong {
     ((dir << 30) | ((size as u32) << 16) | ((b'V' as u32) << 8) | nr) as libc::c_ulong
 }
@@ -135,6 +144,20 @@ fn open(path: &Path, flags: i32) -> io::Result<OwnedFd> {
 }
 
 fn set_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u32) -> io::Result<()> {
+    let chosen = try_format(fd, type_, width, height, pixelformat)?;
+    if chosen != (width, height, pixelformat) {
+        return Err(io::Error::other(format!(
+            "device chose {}x{} {:?}",
+            chosen.0,
+            chosen.1,
+            chosen.2.to_le_bytes().map(char::from)
+        )));
+    }
+    Ok(())
+}
+
+/// Asks for a format and returns the width, height and pixel format the device chose.
+fn try_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u32) -> io::Result<(u32, u32, u32)> {
     let mut f = Format {
         type_,
         ..Default::default()
@@ -150,15 +173,7 @@ fn set_format(fd: &OwnedFd, type_: u32, width: u32, height: u32, pixelformat: u3
     f.fmt.pix = pix;
     ioctl(fd, VIDIOC_S_FMT, &mut f)?;
     let pix = unsafe { f.fmt.pix };
-    if pix.width != width || pix.height != height || pix.pixelformat != pixelformat {
-        return Err(io::Error::other(format!(
-            "device chose {}x{} {:?}",
-            pix.width,
-            pix.height,
-            pixelformat.to_le_bytes().map(char::from)
-        )));
-    }
-    Ok(())
+    Ok((pix.width, pix.height, pix.pixelformat))
 }
 
 struct Mapped {
@@ -245,7 +260,7 @@ impl Capture {
             ..Default::default()
         };
         ioctl(&self.fd, VIDIOC_DQBUF, &mut b)?;
-        let mapped = &self.buffers[b.index as usize];
+        let mapped = self.buffers.get(b.index as usize).ok_or(io::ErrorKind::InvalidData)?;
         let used = (b.bytesused as usize).min(mapped.len);
         let data = unsafe { std::slice::from_raw_parts(mapped.ptr as *const u8, used) };
         let out = f(Frame { data });
@@ -267,10 +282,18 @@ pub struct Output {
 }
 
 impl Output {
-    pub fn open(path: &Path, width: u32, height: u32, pixelformat: u32) -> io::Result<Self> {
+    /// Opens the device for `width` x `height`, or the size it keeps when it will not change (v4l2loopback keeps it
+    /// while an app has the device open). Returns the size in use.
+    pub fn open(path: &Path, width: u32, height: u32, pixelformat: u32) -> io::Result<(Self, (u32, u32))> {
         let fd = open(path, libc::O_RDWR)?;
-        set_format(&fd, BUF_TYPE_VIDEO_OUTPUT, width, height, pixelformat)?;
-        Ok(Self { fd })
+        let (w, h, format) = try_format(&fd, BUF_TYPE_VIDEO_OUTPUT, width, height, pixelformat)?;
+        if format != pixelformat || w < 2 || h < 2 || w % 2 == 1 || h % 2 == 1 {
+            return Err(io::Error::other(format!(
+                "device chose {w}x{h} {:?}",
+                format.to_le_bytes().map(char::from)
+            )));
+        }
+        Ok((Self { fd }, (w, h)))
     }
 
     pub fn write(&mut self, frame: &[u8]) -> io::Result<()> {
@@ -284,6 +307,9 @@ impl Output {
                 }
                 return Err(err);
             }
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
             rest = &rest[n as usize..];
         }
         Ok(())
@@ -293,14 +319,6 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn struct_sizes_match_kernel_abi() {
-        assert_eq!(size_of::<PixFormat>(), 48);
-        assert_eq!(size_of::<Format>(), 208);
-        assert_eq!(size_of::<RequestBuffers>(), 20);
-        assert_eq!(size_of::<Buffer>(), 88);
-    }
 
     #[test]
     fn ioctl_numbers_match_kernel_headers() {

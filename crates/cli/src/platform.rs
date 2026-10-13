@@ -26,22 +26,71 @@ pub fn data_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("opal-rs")
 }
 
+/// Writes a whole file at once: to a temporary file first, then renamed over the old one, so a crash or power
+/// cut leaves the old file or the new one, never half of one.
+pub fn write_file(path: &std::path::Path, data: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(data.as_ref())?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+}
+
 /// Local wall-clock time as HH:MM.
 pub fn local_time() -> String {
+    let (h, m, _) = clock();
+    format!("{h:02}:{m:02}")
+}
+
+/// Local wall-clock time as HH:MM:SS, for the log.
+pub fn log_time() -> String {
+    let (h, m, s) = clock();
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Local hour, minute and second.
+fn clock() -> (u16, u16, u16) {
     #[cfg(unix)]
-    let (h, m) = {
+    {
         let now = unsafe { libc::time(std::ptr::null_mut()) };
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::localtime_r(&now, &mut tm) };
-        (tm.tm_hour as u16, tm.tm_min as u16)
-    };
+        (tm.tm_hour as u16, tm.tm_min as u16, tm.tm_sec as u16)
+    }
     #[cfg(windows)]
-    let (h, m) = {
+    {
         let mut t = unsafe { std::mem::zeroed() };
         unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
-        (t.wHour, t.wMinute)
-    };
-    format!("{h:02}:{m:02}")
+        (t.wHour, t.wMinute, t.wSecond)
+    }
+}
+
+/// Runs `loginctl`, giving up after two seconds: the service's main loop waits on it.
+#[cfg(unix)]
+fn loginctl(args: &[&str]) -> Option<std::process::Output> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("loginctl")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    while child.try_wait().ok()?.is_none() {
+        if start.elapsed() > std::time::Duration::from_secs(2) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().ok()
 }
 
 /// Tells whether the user's desktop is locked.
@@ -56,10 +105,7 @@ impl ScreenLock {
         #[cfg(unix)]
         {
             let session = (|| {
-                let out = std::process::Command::new("loginctl")
-                    .args(["show-user", &std::env::var("USER").ok()?, "-p", "Display", "--value"])
-                    .output()
-                    .ok()?;
+                let out = loginctl(&["show-user", &std::env::var("USER").ok()?, "-p", "Display", "--value"])?;
                 let id = String::from_utf8(out.stdout).ok()?.trim().to_owned();
                 (!id.is_empty()).then_some(id)
             })();
@@ -74,10 +120,7 @@ impl ScreenLock {
         #[cfg(unix)]
         {
             // As the lock screen reports it to logind.
-            let out = std::process::Command::new("loginctl")
-                .args(["show-session", self.session.as_deref()?, "-p", "LockedHint", "--value"])
-                .output()
-                .ok()?;
+            let out = loginctl(&["show-session", self.session.as_deref()?, "-p", "LockedHint", "--value"])?;
             match String::from_utf8_lossy(&out.stdout).trim() {
                 "yes" => Some(true),
                 "no" => Some(false),
@@ -104,9 +147,17 @@ impl ScreenLock {
             if ok == 0 || info.is_null() {
                 return None;
             }
-            let ex = unsafe { &*(info as *const WTSINFOEXW) };
-            let flags = unsafe { ex.Data.WTSInfoExLevel1.SessionFlags } as u32;
-            let locked = (ex.Level == 1).then_some(flags == WTS_SESSIONSTATE_LOCK);
+            let locked = if len as usize >= size_of::<WTSINFOEXW>() {
+                let ex = unsafe { &*(info as *const WTSINFOEXW) };
+                // Level 1 is the only layout of the union.
+                if ex.Level == 1 {
+                    Some(unsafe { ex.Data.WTSInfoExLevel1.SessionFlags } as u32 == WTS_SESSIONSTATE_LOCK)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             unsafe { WTSFreeMemory(info.cast()) };
             locked
         }

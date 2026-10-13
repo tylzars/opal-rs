@@ -22,6 +22,8 @@ pub enum Error {
     Eof,
     #[error("unsupported msgpack type {0:#04x}")]
     Type(u8),
+    #[error("msgpack nested too deep")]
+    TooDeep,
 }
 
 impl Value {
@@ -95,7 +97,7 @@ impl Value {
 
     pub fn decode(data: &[u8]) -> Result<Value, Error> {
         let mut pos = 0;
-        read(data, &mut pos)
+        read(data, &mut pos, 0)
     }
 
     pub fn as_u64(&self) -> Option<u64> {
@@ -167,7 +169,13 @@ fn be<const N: usize>(data: &[u8], pos: &mut usize) -> Result<[u8; N], Error> {
     Ok(take(data, pos, N)?.try_into().unwrap())
 }
 
-fn read(data: &[u8], pos: &mut usize) -> Result<Value, Error> {
+/// Deepest nesting taken; RPC replies nest a few levels.
+const MAX_DEPTH: usize = 64;
+
+fn read(data: &[u8], pos: &mut usize, depth: usize) -> Result<Value, Error> {
+    if depth > MAX_DEPTH {
+        return Err(Error::TooDeep);
+    }
     let t = *data.get(*pos).ok_or(Error::Eof)?;
     *pos += 1;
     let str_of = |data: &[u8], pos: &mut usize, n: usize| -> Result<Value, Error> {
@@ -177,8 +185,8 @@ fn read(data: &[u8], pos: &mut usize) -> Result<Value, Error> {
         0x00..=0x7f => Value::UInt(t as u64),
         0xe0..=0xff => Value::Int(t as i8 as i64),
         0xa0..=0xbf => str_of(data, pos, (t & 0x1f) as usize)?,
-        0x90..=0x9f => array(data, pos, (t & 0x0f) as usize)?,
-        0x80..=0x8f => map(data, pos, (t & 0x0f) as usize)?,
+        0x90..=0x9f => array(data, pos, (t & 0x0f) as usize, depth)?,
+        0x80..=0x8f => map(data, pos, (t & 0x0f) as usize, depth)?,
         0xc0 => Value::Nil,
         0xc2 => Value::Bool(false),
         0xc3 => Value::Bool(true),
@@ -206,39 +214,39 @@ fn read(data: &[u8], pos: &mut usize) -> Result<Value, Error> {
         }
         0xdc => {
             let n = u16::from_be_bytes(be(data, pos)?) as usize;
-            array(data, pos, n)?
+            array(data, pos, n, depth)?
         }
         0xdd => {
             let n = u32::from_be_bytes(be(data, pos)?) as usize;
-            array(data, pos, n)?
+            array(data, pos, n, depth)?
         }
         0xde => {
             let n = u16::from_be_bytes(be(data, pos)?) as usize;
-            map(data, pos, n)?
+            map(data, pos, n, depth)?
         }
         0xdf => {
             let n = u32::from_be_bytes(be(data, pos)?) as usize;
-            map(data, pos, n)?
+            map(data, pos, n, depth)?
         }
         t => return Err(Error::Type(t)),
     })
 }
 
-fn array(data: &[u8], pos: &mut usize, n: usize) -> Result<Value, Error> {
+fn array(data: &[u8], pos: &mut usize, n: usize, depth: usize) -> Result<Value, Error> {
     (0..n)
-        .map(|_| read(data, pos))
+        .map(|_| read(data, pos, depth + 1))
         .collect::<Result<_, _>>()
         .map(Value::Array)
 }
 
-fn map(data: &[u8], pos: &mut usize, n: usize) -> Result<Value, Error> {
+fn map(data: &[u8], pos: &mut usize, n: usize, depth: usize) -> Result<Value, Error> {
     let mut m = BTreeMap::new();
     for _ in 0..n {
-        let k = match read(data, pos)? {
+        let k = match read(data, pos, depth + 1)? {
             Value::Str(s) => s,
             other => format!("{other:?}"),
         };
-        m.insert(k, read(data, pos)?);
+        m.insert(k, read(data, pos, depth + 1)?);
     }
     Ok(Value::Map(m))
 }
@@ -327,6 +335,12 @@ mod tests {
         let bytes = v.encode();
         assert_eq!(&bytes[..3], &[0x82, 0xa1, b'a']);
         assert_eq!(Value::decode(&bytes).unwrap(), v);
+    }
+
+    #[test]
+    fn deep_nesting_is_refused() {
+        assert!(matches!(Value::decode(&[0x91; 100_000]), Err(Error::TooDeep)));
+        assert!(Value::decode(&[0x91, 0x91, 0x01]).is_ok());
     }
 
     #[test]

@@ -15,7 +15,8 @@ mod windows;
 
 /// Sends one command to the service and returns its reply.
 fn send(command: &str) -> Option<String> {
-    opal_ipc::request(command, Duration::from_secs(5)).ok()
+    // Short: the tray's window waits on this.
+    opal_ipc::request(command, Duration::from_secs(1)).ok()
 }
 
 /// Word following `key` in the status line.
@@ -36,6 +37,11 @@ impl Tray {
         self.status.starts_with("mode ")
     }
 
+    /// What the service waits for while no camera session runs.
+    fn waiting(&self) -> Option<&str> {
+        self.status.strip_prefix("waiting ").map(str::trim)
+    }
+
     fn streaming(&self) -> bool {
         value(&self.status, "streaming") == Some("true")
     }
@@ -53,9 +59,12 @@ impl Tray {
         }
     }
 
-    /// Grey while the service is not running, light grey idle, white while streaming, blue while the video is off.
+    /// Grey while the service is not running, light grey idle or waiting for the camera, white while streaming, blue
+    /// while the video is off.
     fn colour(&self) -> [u8; 3] {
-        if !self.running() {
+        if self.waiting().is_some() {
+            [150, 150, 150]
+        } else if !self.running() {
             [110, 110, 110]
         } else if self.streaming() && self.video_off() {
             [70, 120, 255]
@@ -188,7 +197,9 @@ impl ksni::Tray for Tray {
 
 impl Tray {
     fn summary(&self) -> String {
-        if !self.running() {
+        if let Some(code) = self.waiting() {
+            opal_ipc::waiting_text(code).0.into()
+        } else if !self.running() {
             "The camera service is not running".into()
         } else if !self.streaming() {
             "Camera idle".into()

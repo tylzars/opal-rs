@@ -234,7 +234,7 @@ impl BackgroundBlur {
 
         let r = (radius / self.scale).max(1);
         if self.lens {
-            // The hexagon reaches out twice the line half-length.
+            // Brightness blurred in linear light, so highlights bloom; colour blurred plainly.
             lens_plane(&mut self.luma, sw, sh, r, 2.6, self.threads);
             lens_plane(&mut self.u, sw, sh, r, 1.0, self.threads);
             lens_plane(&mut self.v, sw, sh, r, 1.0, self.threads);

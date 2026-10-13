@@ -1,0 +1,73 @@
+# Checks, tests and builds the release packages on every push and pull request. A tag such as v1.0.0 also
+# publishes them as a GitHub release. Nothing from Opal is involved: the camera files never enter the build.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: MinGW linker and cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          cargo install cargo-deb --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint (Linux)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Lint (Windows)
+        run: >-
+          cargo clippy --release --target x86_64-pc-windows-gnu
+          -p opal-rs -p opal-gui -p opal-tray -p opal-vcam -p opal-setup -- -D warnings
+
+      - name: Test
+        run: cargo test --release --workspace
+
+      - name: Packages
+        run: cargo xtask all
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opal-rs-packages
+          path: target/dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opal-rs-packages
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "See INSTALL.md to install. The camera files come from your own Opal Composer download."

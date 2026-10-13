@@ -17,6 +17,8 @@ const CHUNK_IGNORE: u32 = 0x0000_0002;
 const CHUNK_COMMENT: u32 = 0x7fff_fffe;
 const CHUNK_ZLIB: u32 = 0x8000_0005;
 const CHUNK_END: u32 = 0xffff_ffff;
+/// Largest stored chunk taken; real ones are about 1 MB.
+const MAX_CHUNK: u64 = 64 << 20;
 
 pub struct UdifImage {
     file: File,
@@ -86,15 +88,33 @@ impl UdifImage {
             .filter(|c| !matches!(c.kind, CHUNK_COMMENT | CHUNK_END) && c.sectors > 0)
             .collect();
         chunks.sort_by_key(|c| c.sector);
+        let bad = |what: &str| Error::Format(format!("bad chunk table: {what}"));
+        let mut size = 0;
         for c in &chunks {
             if !matches!(c.kind, CHUNK_ZERO | CHUNK_RAW | CHUNK_IGNORE | CHUNK_ZLIB) {
                 return Err(Error::Format(format!("unsupported chunk type {:#x}", c.kind)));
             }
+            let start = c.sector.checked_mul(SECTOR).ok_or_else(|| bad("too large"))?;
+            let end = c
+                .sector
+                .checked_add(c.sectors)
+                .and_then(|e| e.checked_mul(SECTOR))
+                .ok_or_else(|| bad("too large"))?;
+            if start < size {
+                return Err(bad("overlapping chunks"));
+            }
+            if matches!(c.kind, CHUNK_RAW | CHUNK_ZLIB) && (end - start > MAX_CHUNK || c.length > MAX_CHUNK) {
+                return Err(bad("chunk too large"));
+            }
+            size = end;
         }
-        let size = chunks.last().map_or(0, |c| (c.sector + c.sectors) * SECTOR);
+        let base = self
+            .data_fork_offset
+            .checked_add(table.data_offset)
+            .ok_or_else(|| bad("bad offset"))?;
         Ok(Partition {
             file: BufReader::new(self.file.try_clone()?),
-            base: self.data_fork_offset + table.data_offset,
+            base,
             chunks,
             size,
             pos: 0,
@@ -104,7 +124,9 @@ impl UdifImage {
 }
 
 fn parse_partition_tables(xml: &[u8]) -> Result<Vec<PartitionTable>, Error> {
-    let root: plist::Value = plist::from_bytes(xml).map_err(|e| Error::Format(format!("bad UDIF plist: {e}")))?;
+    // The value reader keeps no call stack per nesting level, so a deeply nested file cannot overflow it.
+    let root =
+        plist::Value::from_reader(io::Cursor::new(xml)).map_err(|e| Error::Format(format!("bad UDIF plist: {e}")))?;
     let blkx = root
         .as_dictionary()
         .and_then(|d| d.get("resource-fork"))
@@ -179,28 +201,35 @@ impl Partition {
     fn load(&mut self, index: usize) -> io::Result<&[u8]> {
         if self.cached.as_ref().is_none_or(|(i, _)| *i != index) {
             let c = self.chunks[index];
+            // Stored chunks only; open_partition checked their size.
             let expected = (c.sectors * SECTOR) as usize;
             let bytes = match c.kind {
-                CHUNK_ZERO | CHUNK_IGNORE => vec![0u8; expected],
                 CHUNK_RAW | CHUNK_ZLIB => {
-                    self.file.seek(SeekFrom::Start(self.base + c.offset))?;
+                    let at = self.base.checked_add(c.offset).ok_or(io::ErrorKind::InvalidData)?;
+                    self.file.seek(SeekFrom::Start(at))?;
                     let mut stored = (&mut self.file).take(c.length);
                     let mut out = Vec::with_capacity(expected);
                     if c.kind == CHUNK_RAW {
                         stored.read_to_end(&mut out)?;
                     } else {
-                        ZlibDecoder::new(stored).read_to_end(&mut out)?;
+                        // One byte more than it should hold, to notice a chunk that unpacks to more.
+                        ZlibDecoder::new(stored)
+                            .take(expected as u64 + 1)
+                            .read_to_end(&mut out)?;
                     }
                     if out.len() != expected {
                         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad chunk length"));
                     }
                     out
                 }
-                _ => unreachable!("rejected in open_partition"),
+                _ => return Err(io::ErrorKind::InvalidData.into()),
             };
             self.cached = Some((index, bytes));
         }
-        Ok(&self.cached.as_ref().expect("just filled").1)
+        match &self.cached {
+            Some((_, bytes)) => Ok(bytes),
+            None => Err(io::ErrorKind::InvalidData.into()),
+        }
     }
 }
 
@@ -223,11 +252,21 @@ impl Read for Partition {
             self.pos += n as u64;
             return Ok(n);
         };
-        let start = self.chunks[index].sector * SECTOR;
-        let bytes = self.load(index)?;
+        let chunk = self.chunks[index];
+        let start = chunk.sector * SECTOR;
         let within = (pos - start) as usize;
-        let n = buf.len().min(bytes.len() - within);
-        buf[..n].copy_from_slice(&bytes[within..within + n]);
+        if matches!(chunk.kind, CHUNK_ZERO | CHUNK_IGNORE) {
+            // Read as zeros without holding the whole chunk, which can be any size.
+            let left = chunk.sectors * SECTOR - (pos - start);
+            let n = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+            buf[..n].fill(0);
+            self.pos += n as u64;
+            return Ok(n);
+        }
+        let bytes = self.load(index)?;
+        let rest = bytes.get(within..).ok_or(io::ErrorKind::InvalidData)?;
+        let n = buf.len().min(rest.len());
+        buf[..n].copy_from_slice(&rest[..n]);
         self.pos += n as u64;
         Ok(n)
     }

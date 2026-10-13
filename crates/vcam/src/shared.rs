@@ -1,13 +1,13 @@
 //! Frame buffer shared by the service and the media source: a header, then one NV12 frame.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 /// Name of the shared memory. The source creates it in the global namespace, as Frame Server runs it outside the
 /// user's session, and the service in the user's session opens it there.
 pub const NAME: &str = "Global\\opal-rs-vcam";
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"OPVC");
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_WIDTH: usize = 3840;
 pub const MAX_HEIGHT: usize = 2160;
 pub const HEADER_SIZE: usize = 64;
@@ -22,8 +22,9 @@ pub struct Header {
     pub height: AtomicU32,
     /// Odd while a frame is being written.
     pub seq: AtomicU64,
-    /// 1 while an app takes frames from the source.
-    pub streaming: AtomicU32,
+    /// Counted up by the source each time an app asks for a frame. A count that stopped moving means no app is
+    /// watching, even if the source went away without saying so.
+    pub pulls: AtomicU32,
 }
 
 const _: () = assert!(std::mem::size_of::<Header>() <= HEADER_SIZE);
@@ -47,15 +48,15 @@ impl View {
         unsafe { &*(self.base as *const Header) }
     }
 
-    /// Sets up a new buffer, or checks one made by an earlier run. False if it belongs to another version.
-    pub fn init(&self) -> bool {
+    /// Sets up the buffer for this version. One left by an earlier run of this version is kept as it is; one of
+    /// another version (a service or camera from before an update, still running) is taken over.
+    pub fn init(&self) {
         let h = self.header();
-        if h.magic.load(Ordering::Acquire) == MAGIC {
-            return h.version.load(Ordering::Acquire) == VERSION;
+        if h.magic.load(Ordering::Acquire) == MAGIC && h.version.load(Ordering::Acquire) == VERSION {
+            return;
         }
         h.version.store(VERSION, Ordering::Release);
         h.magic.store(MAGIC, Ordering::Release);
-        true
     }
 
     pub fn valid(&self) -> bool {
@@ -70,15 +71,19 @@ impl View {
     /// Writes one NV12 frame. Frames larger than the buffer are ignored.
     pub fn write(&self, frame: &[u8], width: usize, height: usize) {
         let len = width * height * 3 / 2;
-        if width > MAX_WIDTH || height > MAX_HEIGHT || frame.len() < len {
+        if !frame_size_ok(width, height) || frame.len() < len {
             return;
         }
         let h = self.header();
-        h.seq.fetch_add(1, Ordering::AcqRel);
+        // Odd while writing. Taken from the count rather than added to it, so a writer that died half way does
+        // not leave the count odd for good.
+        let odd = h.seq.load(Ordering::Relaxed) | 1;
+        h.seq.store(odd, Ordering::Relaxed);
+        fence(Ordering::Release);
         h.width.store(width as u32, Ordering::Relaxed);
         h.height.store(height as u32, Ordering::Relaxed);
         unsafe { std::ptr::copy_nonoverlapping(frame.as_ptr(), self.frame_ptr(), len) };
-        h.seq.fetch_add(1, Ordering::AcqRel);
+        h.seq.store(odd.wrapping_add(1), Ordering::Release);
     }
 
     /// Copies the latest frame into `out` and returns its size and sequence count, unless none was written yet or
@@ -93,30 +98,43 @@ impl View {
             h.width.load(Ordering::Relaxed) as usize,
             h.height.load(Ordering::Relaxed) as usize,
         );
-        if w == 0 || hgt == 0 || w > MAX_WIDTH || hgt > MAX_HEIGHT {
+        if !frame_size_ok(w, hgt) {
             return None;
         }
         let len = w * hgt * 3 / 2;
         out.resize(len, 0);
         unsafe { std::ptr::copy_nonoverlapping(self.frame_ptr(), out.as_mut_ptr(), len) };
-        (h.seq.load(Ordering::Acquire) == before).then_some((w, hgt, before))
+        // Keeps the copy above before the check below.
+        fence(Ordering::Acquire);
+        (h.seq.load(Ordering::Relaxed) == before).then_some((w, hgt, before))
     }
 
     pub fn latest_seq(&self) -> u64 {
         self.header().seq.load(Ordering::Acquire)
     }
 
-    pub fn set_streaming(&self, on: bool) {
-        self.header().streaming.store(on as u32, Ordering::Release);
+    /// Notes that an app asked for a frame.
+    pub fn pull(&self) {
+        self.header().pulls.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn streaming(&self) -> bool {
-        self.header().streaming.load(Ordering::Acquire) == 1
+    pub fn pulls(&self) -> u32 {
+        self.header().pulls.load(Ordering::Relaxed)
     }
 }
 
-/// Nearest-pixel resize of an NV12 frame, for apps that ask for another size than the service sends.
+/// An NV12 size that fits the buffer: even, at least 2 x 2.
+fn frame_size_ok(w: usize, h: usize) -> bool {
+    (2..=MAX_WIDTH).contains(&w) && (2..=MAX_HEIGHT).contains(&h) && w.is_multiple_of(2) && h.is_multiple_of(2)
+}
+
+/// Nearest-pixel resize of an NV12 frame, for apps that ask for another size than the service sends. Sizes that
+/// do not fit the buffers leave `dst` as it is.
 pub fn resize_nv12(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: usize) {
+    let fits = |b: &[u8], w: usize, h: usize| frame_size_ok(w, h) && b.len() >= w * h * 3 / 2;
+    if !fits(src, sw, sh) || !fits(dst, dw, dh) {
+        return;
+    }
     if sw == dw && sh == dh {
         dst[..dw * dh * 3 / 2].copy_from_slice(&src[..sw * sh * 3 / 2]);
         return;
@@ -151,7 +169,8 @@ mod tests {
     fn write_then_read() {
         let mut mem = buffer();
         let view = unsafe { View::new(mem.as_mut_ptr() as *mut u8) };
-        assert!(view.init());
+        view.init();
+        assert!(view.valid());
         let mut out = Vec::new();
         assert!(view.read(&mut out).is_none(), "nothing written yet");
         let frame: Vec<u8> = (0..64 * 32 * 3 / 2).map(|i| i as u8).collect();
@@ -159,11 +178,43 @@ mod tests {
         let (w, h, seq) = view.read(&mut out).unwrap();
         assert_eq!((w, h, seq), (64, 32, 2));
         assert_eq!(out, frame);
-        assert!(!view.streaming());
-        view.set_streaming(true);
-        assert!(view.streaming());
-        assert!(view.init(), "an existing buffer of this version is kept");
-        assert_eq!(view.latest_seq(), 2);
+        assert_eq!(view.pulls(), 0);
+        view.pull();
+        assert_eq!(view.pulls(), 1);
+        view.init();
+        assert_eq!(view.latest_seq(), 2, "an existing buffer of this version is kept");
+        // One of another version is taken over.
+        view.header().version.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(!view.valid());
+        view.init();
+        assert!(view.valid());
+    }
+
+    #[test]
+    fn writer_that_died_half_way_is_recovered() {
+        let mut mem = buffer();
+        let view = unsafe { View::new(mem.as_mut_ptr() as *mut u8) };
+        view.init();
+        // As if a service was killed between marking a frame and finishing it.
+        view.header().seq.store(5, std::sync::atomic::Ordering::Relaxed);
+        let mut out = Vec::new();
+        assert!(view.read(&mut out).is_none());
+        view.write(&[9; 6], 2, 2);
+        assert_eq!(view.read(&mut out), Some((2, 2, 6)));
+    }
+
+    #[test]
+    fn odd_or_tiny_sizes_are_refused() {
+        let mut mem = buffer();
+        let view = unsafe { View::new(mem.as_mut_ptr() as *mut u8) };
+        view.write(&[0; 6], 1, 1);
+        view.write(&[0; 30], 5, 4);
+        let mut out = Vec::new();
+        assert!(view.read(&mut out).is_none());
+        let mut dst = vec![7u8; 1920 * 1080 * 3 / 2];
+        resize_nv12(&[0; 1], 1, 1, &mut dst, 1920, 1080);
+        resize_nv12(&[0; 6], 2, 2, &mut dst, 4000, 4000);
+        assert!(dst.iter().all(|&b| b == 7));
     }
 
     #[test]

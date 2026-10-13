@@ -6,6 +6,17 @@ mod usb;
 
 pub use link::{Error, Link, StreamId};
 
+/// Locking that carries on after another thread panicked while holding the lock, instead of panicking too.
+pub trait LockExt<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for std::sync::Mutex<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 use nusb::MaybeFuture;
 
 pub const VID: u16 = 0x03e7;
@@ -53,6 +64,28 @@ pub struct Found {
 impl Found {
     pub fn serial(&self) -> Option<&str> {
         self.info.serial_number()
+    }
+
+    /// Whether a running camera is on a USB 2 or slower connection; `false` when the system does not say. The
+    /// bootloader always runs at USB 2 speed, so it never counts.
+    pub fn slow_usb(&self) -> bool {
+        self.state != State::Bootloader
+            && matches!(
+                self.info.speed(),
+                Some(nusb::Speed::Low | nusb::Speed::Full | nusb::Speed::High)
+            )
+    }
+
+    /// The connection's speed as the system reports it, in the camera's own words (`high` is USB 2).
+    pub fn usb_speed(&self) -> &'static str {
+        match self.info.speed() {
+            Some(nusb::Speed::Low) => "low",
+            Some(nusb::Speed::Full) => "full",
+            Some(nusb::Speed::High) => "high",
+            Some(nusb::Speed::Super) => "super",
+            Some(nusb::Speed::SuperPlus) => "super-plus",
+            _ => "unknown",
+        }
     }
 }
 

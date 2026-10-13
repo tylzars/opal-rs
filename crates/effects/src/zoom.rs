@@ -23,11 +23,20 @@ impl Rect {
 
     /// Moves and shrinks the rect so it lies within a `width` x `height` frame.
     pub fn clamped(self, width: usize, height: usize) -> Self {
-        let w = self.width.clamp(1.0, width as f32);
-        let h = self.height.clamp(1.0, height as f32);
+        let (fw, fh) = (width.max(1) as f32, height.max(1) as f32);
+        if ![self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite()) {
+            return Self {
+                x: 0.0,
+                y: 0.0,
+                width: fw,
+                height: fh,
+            };
+        }
+        let w = self.width.clamp(1.0, fw);
+        let h = self.height.clamp(1.0, fh);
         Self {
-            x: self.x.clamp(0.0, width as f32 - w),
-            y: self.y.clamp(0.0, height as f32 - h),
+            x: self.x.clamp(0.0, fw - w),
+            y: self.y.clamp(0.0, fh - h),
             width: w,
             height: h,
         }

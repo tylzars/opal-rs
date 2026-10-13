@@ -64,17 +64,17 @@ impl Resolution {
 }
 
 /// Person segmentation of the preview, FP16 [2, 144, 256]: background and person scores.
-pub const SEGMENTATION_STREAM: &str = "google_meet_segmentation";
+pub const SEGMENTATION_STREAM: &str = "segmentation";
 /// NN config messages that pause or resume segmentation.
-pub const SEGMENTATION_CONTROL_STREAM: &str = "ctrlSegmenter";
+pub const SEGMENTATION_CONTROL_STREAM: &str = "segmentationNet";
 pub const SEGMENTATION_WIDTH: u32 = 256;
 pub const SEGMENTATION_HEIGHT: u32 = 144;
 const SEGMENTATION_BLOB: &str = "49559974de.tlv";
 
 /// Face detections, SSD rows of [image, label, confidence, x0, y0, x1, y1] in `detection_out`.
-pub const FACE_STREAM: &str = "face_detection";
+pub const FACE_STREAM: &str = "faces";
 /// NN config messages that pause or resume face detection.
-pub const FACE_CONTROL_STREAM: &str = "ctrlFace";
+pub const FACE_CONTROL_STREAM: &str = "facesNet";
 const FACE_BLOB: &str = "dd0bad95b2.tlv";
 const FACE_INPUT: i32 = 300;
 
@@ -104,9 +104,9 @@ impl Branch {
     /// Stream for configs to the crop.
     pub fn crop_control(self) -> &'static str {
         match self {
-            Self::Segmentation => "ctrlSegmenterImageManip",
-            Self::Face => "ctrlFaceImageManip",
-            Self::Palm => "ctrlPalmImageManip",
+            Self::Segmentation => "segmentationCrop",
+            Self::Face => "facesCrop",
+            Self::Palm => "palmCrop",
         }
     }
 
@@ -127,11 +127,14 @@ pub const PREVIEW_SIZE: (u32, u32) = (PREVIEW_WIDTH, PREVIEW_HEIGHT);
 /// GPIOs of the status LED's red, green and blue.
 const LED_GPIOS: [i32; 3] = [58, 37, 34];
 
-/// Drives the status LED from [red, green, blue] bytes, each 0 or 1 (GPIO 58, 37, 34).
-const LED_SCRIPT: &str = r#"
+/// Script on the camera that drives the status LED from [red, green, blue] bytes, each 0 or 1.
+fn led_script() -> String {
+    let [r, g, b] = LED_GPIOS;
+    format!(
+        r#"
 import GPIO
 
-PINS = (58, 37, 34)
+PINS = ({r}, {g}, {b})
 for pin in PINS:
     GPIO.setup(pin, GPIO.OUT)
     GPIO.write(pin, 0)
@@ -140,7 +143,9 @@ while True:
     rgb = node.io["led"].get().getData()
     for pin, value in zip(PINS, rgb):
         GPIO.write(pin, 1 if value else 0)
-"#;
+"#
+    )
+}
 
 /// Status LED states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +218,7 @@ pub fn pipeline(
 ) -> std::io::Result<Pipeline> {
     let (width, height) = res.size();
     let (num, den) = res.scale();
+    let blob = |name: &str| std::fs::read(asset_dir.join(name));
     let mut p = Pipeline::default();
     p.set_xlink_chunk_size(0);
     let mut init = CameraControl::default();
@@ -235,8 +241,8 @@ pub fn pipeline(
         video_height: height as i32,
         resolution: resolution::K4,
         // Asking for more than 30 keeps frame times short: at 30 the camera stretches each frame past its exposure
-        // (26 fps in room light against 29 at 36). Its 4K readout tops out near 37. Low power video is fixed at 30.
-        fps: if low_power { 30.0 } else { 36.0 },
+        // (26 fps in room light against 29 at 36). Its 4K readout tops out near 37.
+        fps: 36.0,
         isp_scale: if num < den {
             IspScale {
                 horiz_num: num,
@@ -250,7 +256,7 @@ pub fn pipeline(
         ..Default::default()
     });
     if let Some(file) = tuning_file(sensor) {
-        p.set_camera_tuning(std::fs::read(asset_dir.join(file))?);
+        p.set_camera_tuning(blob(file)?);
     }
     let ctrl = p.xlink_in(CONTROL_STREAM, 1024);
     p.link(ctrl, "out", cam, "inputControl");
@@ -281,7 +287,7 @@ pub fn pipeline(
         p.link(cam, "preview", seg_size, "inputImage");
         let seg_crop = p.xlink_in(Branch::Segmentation.crop_control(), 1024);
         p.link(seg_crop, "out", seg_size, "inputConfig");
-        let seg = p.neural_network(std::fs::read(asset_dir.join(SEGMENTATION_BLOB))?, 2, 2, 0);
+        let seg = p.neural_network(blob(SEGMENTATION_BLOB)?, 2, 2, 0);
         p.link(seg_size, "out", seg, "in");
         let seg_out = p.xlink_out(SEGMENTATION_STREAM, false, 1, 30.0);
         p.link(seg, "out", seg_out, "in");
@@ -292,14 +298,13 @@ pub fn pipeline(
         p.link(cam, "preview", face_size, "inputImage");
         let face_crop = p.xlink_in(Branch::Face.crop_control(), 1024);
         p.link(face_crop, "out", face_size, "inputConfig");
-        let face = p.neural_network(std::fs::read(asset_dir.join(FACE_BLOB))?, 2, 2, 1);
+        let face = p.neural_network(blob(FACE_BLOB)?, 2, 2, 1);
         p.link(face_size, "out", face, "in");
         let face_out = p.xlink_out(FACE_STREAM, false, 1, 30.0);
         p.link(face, "out", face_out, "in");
         let face_ctrl = p.xlink_in(FACE_CONTROL_STREAM, 256);
         p.link(face_ctrl, "out", face, "inConfig");
 
-        let blob = |name: &str| std::fs::read(asset_dir.join(name));
         let (pd, lm) = (hands::PALM_INPUT, hands::LANDMARK_INPUT);
         let palm_size = p.image_manip(Branch::Palm.crop(false), pd * pd * 3, 1);
         p.link(cam, "preview", palm_size, "inputImage");
@@ -321,7 +326,7 @@ pub fn pipeline(
         p.link(landmarks, "out", landmarks_out, "in");
     }
 
-    let led = p.script(LED_SCRIPT, &["led"], &[], Processor::LeonMss);
+    let led = p.script(&led_script(), &["led"], &[], Processor::LeonMss);
     let led_in = p.xlink_in(LED_STREAM, 64);
     p.link(led_in, "out", led, "led");
     Ok(p)

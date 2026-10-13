@@ -10,9 +10,9 @@ name = "opal-rs-gui"
 path = "src/main.rs"
 
 [dependencies]
-opal-ipc = { version = "0.1.0", path = "../ipc" }
+opal-ipc = { path = "../ipc" }
 eframe = "0.36.2"
-opal-effects = { version = "0.1.0", path = "../effects" }
+opal-effects = { path = "../effects" }
 
 [target.'cfg(unix)'.dependencies]
-opal-v4l2 = { version = "0.1.0", path = "../v4l2" }
+opal-v4l2 = { path = "../v4l2" }

@@ -133,12 +133,7 @@ impl Sticker {
             },
             "picture" => {
                 let path = rest.join(" ");
-                let img = image::ImageReader::open(Path::new(&path))
-                    .and_then(|r| r.with_guessed_format())
-                    .with_context(|| path.clone())?
-                    .decode()
-                    .with_context(|| path.clone())?
-                    .to_rgba8();
+                let img = crate::daemon::open_picture(Path::new(&path))?.to_rgba8();
                 let image = Arc::new(Rgba {
                     width: img.width() as usize,
                     height: img.height() as usize,
@@ -198,8 +193,9 @@ impl Sticker {
         let content = self.content();
         // Long text at a big size would make a huge image; such text is drawn smaller to fit.
         let chars = content.chars().count().max(1);
-        let height = match self.kind {
-            Kind::Picture { .. } => height,
+        let height = match &self.kind {
+            // Wide pictures are drawn lower so they are no wider than the frame twice over.
+            Kind::Picture { image, .. } => height.min(max_width * 2 * image.height / image.width.max(1)).max(1),
             _ => height.min(max_width * 2 / chars).max(4),
         };
         if let Some((c, h, img)) = &self.cache
@@ -237,6 +233,23 @@ pub struct Scene<'a> {
     pub mask: Option<&'a Mask>,
 }
 
+/// Most stickers at once; each picture can hold a lot of memory.
+const MAX_STICKERS: usize = 32;
+
+/// The stickers in a stickers file, one per line; lines that do not parse are reported and skipped.
+pub fn parse_file(text: &str) -> Vec<Sticker> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            Sticker::parse(0, &words)
+                .inspect_err(|e| eprintln!("sticker {line}: {e}"))
+                .ok()
+        })
+        .collect()
+}
+
 impl Stickers {
     pub fn new() -> Self {
         Self {
@@ -245,15 +258,23 @@ impl Stickers {
         }
     }
 
-    pub fn add(&mut self, words: &[&str]) -> Result<u32> {
-        self.next_id += 1;
-        let s = Sticker::parse(self.next_id, words)?;
+    /// Adds a sticker made with [`Sticker::parse`], which can be done before taking the lock (pictures take a
+    /// while to decode). Returns its number.
+    pub fn insert(&mut self, mut s: Sticker) -> Result<u32> {
         anyhow::ensure!(
             self.font.is_some() || matches!(s.kind, Kind::Picture { .. }),
             "no font found for text stickers"
         );
+        anyhow::ensure!(self.list.len() < MAX_STICKERS, "at most {MAX_STICKERS} stickers");
+        self.next_id += 1;
+        s.id = self.next_id;
         self.list.push(s);
         Ok(self.next_id)
+    }
+
+    #[cfg(test)]
+    pub fn add(&mut self, words: &[&str]) -> Result<u32> {
+        self.insert(Sticker::parse(0, words)?)
     }
 
     pub fn get(&mut self, id: &str) -> Result<&mut Sticker> {
@@ -278,14 +299,13 @@ impl Stickers {
         self.list.iter().map(|s| format!("{}\n", s.line())).collect()
     }
 
-    /// Replaces the stickers with those in a stickers file's text. Lines that fail are reported and skipped.
-    pub fn load(&mut self, text: &str) {
+    /// Replaces the stickers with ones from [`parse_file`].
+    pub fn replace(&mut self, stickers: Vec<Sticker>) {
         self.list.clear();
         self.next_id = 0;
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let words: Vec<&str> = line.split_whitespace().collect();
-            if let Err(e) = self.add(&words) {
-                eprintln!("sticker {line}: {e}");
+        for s in stickers {
+            if let Err(e) = self.insert(s) {
+                eprintln!("sticker: {e}");
             }
         }
     }
@@ -357,9 +377,9 @@ mod tests {
         st.get(&id.to_string()).unwrap().behind = false;
         let again = st.text();
         let mut other = Stickers::new();
-        other.load(&again);
+        other.replace(parse_file(&again));
         assert_eq!(other.text(), again);
-        other.load(&again);
+        other.replace(parse_file(&again));
         assert_eq!(other.list.iter().map(|s| s.id).collect::<Vec<_>>(), [1, 2, 3]);
         assert!(st.add(&["text", "0.5", "0.5", "0.1", "-", "mauve", "hi"]).is_err());
         assert!(st.add(&["clock", "0.5", "0.5", "3", "-"]).is_err());

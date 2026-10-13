@@ -1,49 +1,54 @@
 # opal-rs
 
-Linux and Windows host software for the Opal C1 webcam, written in Rust.
+Use the Opal C1 webcam on Linux and Windows, with its effects, without Opal's own app.
 
-**No Opal software is included.** The repository holds no firmware, neural networks, tuning data or code from Opal
-Composer. The files the camera needs are extracted from your own copy of the Opal Composer disk image; see
-[INSTALL.md](INSTALL.md).
+opal-rs runs the camera and adds a camera called **"Opal C1 Virtual"** with blur, backgrounds, looks, face tracking
+and the rest applied. A control panel and a tray icon change it all, even during a call.
 
-| Release | Disk image | SHA-256 |
+## Getting started
+1. Install the package for the system: see [INSTALL.md](INSTALL.md).
+2. Open **Opal C1 Control**. The first time, it asks for Opal Composer, Opal's free app, which holds the camera's
+   firmware and AI models.
+3. In applications, choose **"Opal C1 Virtual"**.
+
+Applications also list the camera's own "Opal C1", which gives no video while opal-rs runs the camera (except in low
+power mode on Linux).
+
+## Features
+| | |
+| --- | --- |
+| Video | 720p, 1080p, 1440p or 4K. Focus, exposure, white balance and flicker control. |
+| Background | Blur (soft or lens-like) or a picture in place of the room. |
+| Look | Ten built-in colour looks or custom `.cube` files; lighting, colour and skin touch-up controls. |
+| Framing | Face tracking keeps the face in the middle of the picture; digital zoom. |
+| Stickers | Text, a name card, a clock, a timer or pictures, in front of or behind the person. |
+| Gestures | A peace sign turns the video off and on; a pinch turns face tracking on and off. |
+| Extras | Presets, a short video loop, pixelate, a camera-off picture, preview with zebra stripes and histogram. |
+| Low power | A plain webcam with no effects, for slower computers (Linux). |
+
+The camera only runs while an application uses it, and it stops while the screen is locked. Its light is white
+while it sends video and blue while the video is off.
+
+## Systems
+| System | Support |
+| --- | --- |
+| Ubuntu 24.04, Debian 13 or newer | Everything, plus extra virtual cameras so several apps can use the C1 at once. |
+| Windows 11 | Everything except low power mode. |
+| Windows 10 | Not supported: Windows 10 has no virtual cameras. Opal C1 still works there as a plain webcam. |
+
+## Requirements
+The Opal Composer disk image, from Opal's download page:
+
+| Release | File | SHA-256 |
 | --- | --- | --- |
 | Opal Composer 2.0 (build 24) | `Opal_Composer_2.0.0_24.dmg` | `4eaa1225a203b057dbabaa7b17d7bbff91512cac32e942359b651dbef06928b3` |
 
-## What it does
-- Boots the camera's firmware from RAM and runs it as a webcam: video goes to a virtual camera
-  ("Opal C1 Virtual", via `v4l2loopback`), the microphone appears as a normal USB microphone.
-- Video at 720p, 1080p, 1440p or 4K (2160p).
-- On Linux, extra virtual cameras with names you choose, so several apps can use the Opal C1 at once.
-- Streams only while an app uses the camera; the status LED is white while it streams, and blue while your video
-  is off but the camera still watches for gestures.
-- Focus, exposure, white balance, light flicker (50/60 Hz), image adjustments, zoom, microphone gain and mute.
-- Background blur or a background picture, using person segmentation running on the camera; pixelate.
-- Stickers: text, a name card, a clock, a timer or your own pictures, which can sit behind you or follow your face.
-- Loop: record a few seconds and play them in place of your live video.
-- Touch up: smoother skin, even skin tone and skin warmth.
-- Lighting and colour: temperature, tint, shadows, highlights, vibrance, and hue, strength and lightness of eight
-  colours. A white picker sets temperature and tint from something grey in the picture.
-- Colour looks: ten built in (black and white, faded, vivid, warm, cool and more), or your own Adobe `.cube` files.
-- Face framing: the picture follows your face, using face detection running on the camera.
-- Hand gestures: hold up a peace sign to turn the video off and on, or pinch to turn face framing on and off; each
-  can be switched off on its own.
-- Low power mode: the camera works as an ordinary webcam with no effects, so your computer does less work.
-- On a USB 2 port the video drops to 720p.
-- Zebra stripes and a histogram in the control panel's preview.
-- Presets: save a look with its lighting and effects under a name and switch between them.
-- Shows a camera-off picture while your video is off, and turns the camera off while the screen is locked.
-- A tray icon shows when the camera is on and turns the video on and off.
-- Runs as a systemd user service controlled with `opal-rs ctl`; settings are kept between runs.
-- `opal-rs webcam` runs the camera as an ordinary webcam with no service.
-- Windows 11: the same, with a Windows virtual camera, control panel and tray icon. Windows 10 runs in low power
-  mode only, as it has no virtual cameras.
+opal-rs does not include any of Opal's software; it takes what the camera needs from Opal Composer.
 
-It never writes to the camera's flash. Unplugging the camera returns it to its built-in firmware.
-
-## Documentation
-- [INSTALL.md](INSTALL.md): installing (a .deb on Ubuntu and Debian, an installer on Windows) or building from source
-- [docs/c1-protocol.md](docs/c1-protocol.md): notes on the camera's USB interface
+## More
+- [INSTALL.md](INSTALL.md): installing, first run, everyday use, the command line, uninstalling.
+- [DEVELOPING.md](DEVELOPING.md): building from source, the release packages, how the code fits together.
+- [docs/c1-protocol.md](docs/c1-protocol.md): notes on the camera's USB interface.
 
 Opal and Opal C1 are the property of Opal Camera Inc. This project is not affiliated with or endorsed by Opal Camera
 Inc.

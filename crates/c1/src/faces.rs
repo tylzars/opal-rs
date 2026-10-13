@@ -28,6 +28,10 @@ impl Face {
         ((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0)
     }
 
+    fn area(&self) -> f32 {
+        self.width() * self.height()
+    }
+
     fn distance(&self, other: &Face) -> f32 {
         [
             self.x0 - other.x0,
@@ -64,7 +68,7 @@ pub fn decode(nn: &NnData, data: &[u8]) -> Vec<Face> {
         .collect()
 }
 
-/// Follows one face: each time, the detection closest to the face followed so far.
+/// Follows one face: first the biggest, then each time the detection closest to the face followed so far.
 #[derive(Default)]
 pub struct Tracker {
     last: Option<Face>,
@@ -72,11 +76,13 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn update(&mut self, faces: &[Face]) -> Option<Face> {
-        let from = self.last.unwrap_or_default();
-        let face = faces
-            .iter()
-            .min_by(|a, b| a.distance(&from).total_cmp(&b.distance(&from)))
-            .copied()?;
+        let face = match self.last {
+            Some(from) => faces
+                .iter()
+                .min_by(|a, b| a.distance(&from).total_cmp(&b.distance(&from))),
+            None => faces.iter().max_by(|a, b| a.area().total_cmp(&b.area())),
+        }
+        .copied()?;
         self.last = Some(face);
         Some(face)
     }
@@ -102,7 +108,7 @@ mod tests {
         assert_eq!(t.update(&[]), None);
         let a = face(0.1, 0.1, 0.2, 0.2);
         let b = face(0.6, 0.6, 0.8, 0.8);
-        assert_eq!(t.update(&[b, a]), Some(a));
-        assert_eq!(t.update(&[b, face(0.12, 0.1, 0.22, 0.2)]).unwrap().x0, 0.12);
+        assert_eq!(t.update(&[a, b]), Some(b));
+        assert_eq!(t.update(&[a, face(0.62, 0.6, 0.82, 0.8)]).unwrap().x0, 0.62);
     }
 }

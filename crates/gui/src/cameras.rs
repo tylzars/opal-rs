@@ -1,5 +1,6 @@
 //! The Virtual cameras card on Linux: add and remove extra cameras through `opal-rs cameras`.
 
+use crate::LockExt;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -63,7 +64,7 @@ fn rows(reply: &str) -> Vec<Row<'_>> {
 impl Card {
     /// `reply` is the service's latest `cameras` reply. Returns true when the list should be read again.
     pub fn show(&mut self, ui: &mut Ui, reply: &str) -> bool {
-        let running = matches!(*self.job.lock().unwrap(), Job::Running(_));
+        let running = matches!(*self.job.locked(), Job::Running(_));
         card(ui, "", |ui| {
             hint(
                 ui,
@@ -117,7 +118,7 @@ impl Card {
                     self.name.clear();
                 }
             });
-            match &*self.job.lock().unwrap() {
+            match &*self.job.locked() {
                 Job::Idle => {}
                 Job::Running(what) => {
                     ui.label(egui::RichText::new(what).small().color(WEAK));
@@ -128,7 +129,7 @@ impl Card {
                 }
             }
         });
-        let done = matches!(*self.job.lock().unwrap(), Job::Done(_));
+        let done = matches!(*self.job.locked(), Job::Done(_));
         let refresh = done && !self.refreshed;
         self.refreshed |= done;
         refresh
@@ -142,7 +143,7 @@ impl Card {
             ("remove", Some(n)) => format!("Removing {n}"),
             _ => "Applying".to_owned(),
         };
-        *self.job.lock().unwrap() = Job::Running(format!("{doing}: enter the administrator password..."));
+        *self.job.locked() = Job::Running(format!("{doing}: enter the administrator password..."));
         let (job, name) = (self.job.clone(), name.map(str::to_owned));
         std::thread::spawn(move || {
             let out = Command::new(opal_ipc::program("opal-rs"))
@@ -161,7 +162,7 @@ impl Card {
                 }
                 Err(e) => format!("opal-rs: {e}"),
             };
-            *job.lock().unwrap() = Job::Done(text);
+            *job.locked() = Job::Done(text);
         });
     }
 }

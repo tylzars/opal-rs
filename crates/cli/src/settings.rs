@@ -180,7 +180,8 @@ impl Settings {
                 .retain(|k, _| !ADJUSTMENTS.contains(k) && !opal_effects::COLOURS.iter().any(|(n, _)| n == k));
         } else {
             self.commands
-                .insert(g, command.split_whitespace().collect::<Vec<_>>().join(" "));
+                // As typed: a file path may hold several spaces in a row.
+                .insert(g, command.trim().to_owned());
         }
         self.save()
     }
@@ -193,7 +194,7 @@ impl Settings {
         if text.is_empty() {
             text.push('\n');
         }
-        std::fs::write(&self.path, text)
+        crate::platform::write_file(&self.path, text)
     }
 
     /// The saved video resolution.
@@ -214,8 +215,10 @@ impl Settings {
     }
 
     /// True when low power mode is saved.
+    /// Low power mode is Linux only: on Windows neither the firmware loaded here nor the camera's own serves the
+    /// camera's USB video reliably, so a saved choice from an older version is ignored there.
     pub fn low_power(&self) -> bool {
-        self.commands.get("power").is_some_and(|c| c == "power low")
+        cfg!(unix) && self.commands.get("power").is_some_and(|c| c == "power low")
     }
 
     pub fn commands(&self) -> impl Iterator<Item = &str> {

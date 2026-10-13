@@ -504,7 +504,7 @@ impl NnData {
         if t.data_type != TENSOR_FP16 {
             return None;
         }
-        let count = t.dims.iter().product::<u32>() as usize;
+        let count = t.dims.iter().try_fold(1u32, |a, &d| a.checked_mul(d))? as usize;
         let bytes = data.get(t.offset as usize..t.offset as usize + count * 2)?;
         Some(
             bytes

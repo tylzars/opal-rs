@@ -46,16 +46,36 @@ fn decode_at(data: &[u8], start: usize) -> Option<EmbeddedStream> {
         if &footer[8..10] != flags || crc32fast::hash(&footer[4..10]) != le_u32(footer, 0) {
             continue;
         }
-        let mut decoded = Vec::new();
+        let mut decoded = Limited(Vec::new());
         if lzma_rs::xz_decompress(&mut Cursor::new(&data[start..end]), &mut decoded).is_ok() {
             return Some(EmbeddedStream {
                 offset: start,
                 len: end - start,
-                decoded,
+                decoded: decoded.0,
             });
         }
     }
     None
+}
+
+/// Largest stream unpacked; the camera firmware archive is far smaller.
+const MAX_DECODED: usize = 512 << 20;
+
+/// Output that fails once it would pass `MAX_DECODED`, so a stream that unpacks to a huge size is given up.
+struct Limited(Vec<u8>);
+
+impl std::io::Write for Limited {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buf.len() > MAX_DECODED {
+            return Err(std::io::Error::other("stream too large"));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

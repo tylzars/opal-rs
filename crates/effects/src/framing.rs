@@ -94,6 +94,10 @@ impl Framing {
 
     /// Takes a face, normalised to the frame: centre and height.
     pub fn face(&mut self, cx: f32, cy: f32, height: f32) {
+        // One bad value would stay in the filter for good.
+        if !(cx.is_finite() && cy.is_finite() && height.is_finite()) {
+            return;
+        }
         let q = self.speed.process_noise();
         let f = self
             .face

@@ -135,19 +135,13 @@ pub fn boot_image(config: &BoardConfig, firmware: &[u8]) -> Vec<u8> {
     out
 }
 
-impl BoardConfig {
-    pub fn encode(&self) -> Vec<u8> {
-        nop::to_vec(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn default_config_bytes() {
-        let b = BoardConfig::default().encode();
+        let b = nop::to_vec(&BoardConfig::default());
         assert_eq!(
             b,
             [

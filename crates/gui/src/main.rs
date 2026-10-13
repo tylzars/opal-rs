@@ -189,7 +189,8 @@ impl Controls {
                 ["gesture", "peace", g] => c.peace = *g == "on",
                 ["gesture", "pinch", g] => c.pinch = *g == "on",
                 ["lockpause", v] => c.lock_pause = *v == "on",
-                ["power", p] => c.low_power = *p == "low",
+                // Low power mode is Linux only.
+                ["power", p] => c.low_power = cfg!(unix) && *p == "low",
                 ["resolution", r] => c.resolution = (*r).to_owned(),
                 ["antibanding", a] => c.antibanding = (*a).to_owned(),
                 ["magnify", "off"] => c.magnify = 1.0,
@@ -246,7 +247,6 @@ pub(crate) fn load_settings() -> (Controls, String) {
     }
 }
 
-/// Asks the service for its status once a second.
 /// Saved presets and stickers as the service lists them, read in the background.
 #[derive(Default)]
 pub(crate) struct Lists {
@@ -269,8 +269,8 @@ fn poll_status_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Arc<Mutex
         let mut tick = 0u32;
         loop {
             let status = send("status").unwrap_or_else(|e| e);
-            *slot.lock().unwrap() = Some(status);
-            if tick.is_multiple_of(3) || lists.lock().unwrap().stale {
+            *slot.locked() = Some(status);
+            if tick.is_multiple_of(3) || lists.locked().stale {
                 let presets = send("preset list").unwrap_or_default();
                 let stickers = send("sticker list").unwrap_or_default();
                 let cameras = if cfg!(unix) {
@@ -278,14 +278,14 @@ fn poll_status_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Arc<Mutex
                 } else {
                     String::new()
                 };
-                let mut l = lists.lock().unwrap();
+                let mut l = lists.locked();
                 (l.presets, l.stickers, l.cameras, l.stale) = (presets, stickers, cameras, false);
                 l.serial += 1;
             }
             ctx.request_repaint();
             for _ in 0..10 {
                 std::thread::sleep(Duration::from_millis(100));
-                if lists.lock().unwrap().stale {
+                if lists.locked().stale {
                     break;
                 }
             }
@@ -393,7 +393,7 @@ impl App {
     }
 
     fn poll_status(&mut self) {
-        let Some(status) = self.latest.lock().unwrap().take() else {
+        let Some(status) = self.latest.locked().take() else {
             return;
         };
         self.status = status;
@@ -413,10 +413,6 @@ impl App {
             && let Some(z) = words.next()
         {
             self.c.zoom = z != "off";
-        }
-        // Windows 10 has no virtual camera, so the service runs in low power mode there.
-        if self.status_value("virtualcam") == Some("no") {
-            self.c.low_power = true;
         }
         // The microphone can be switched elsewhere too.
         if let Some(m) = self.status_value("mic") {
@@ -460,4 +456,15 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, debug)))),
     )
+}
+
+/// Locking that carries on after another thread panicked while holding the lock, instead of panicking too.
+pub(crate) trait LockExt<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for std::sync::Mutex<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }

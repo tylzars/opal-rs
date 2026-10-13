@@ -830,10 +830,9 @@ impl Pipeline {
 }
 
 fn io_group(p: &Pipeline, node: NodeId, name: &str) -> &'static str {
-    p.nodes[node.0 as usize]
-        .io
-        .iter()
-        .find(|io| io.name == name)
+    p.nodes
+        .get(node.0 as usize)
+        .and_then(|n| n.io.iter().find(|io| io.name == name))
         .map_or("", |io| io.group)
 }
 
@@ -859,16 +858,26 @@ impl Device {
                 .as_u64()
                 .ok_or(Error::BadResponse)?;
             let link = self.link().clone();
-            let writer = thread::spawn(move || -> Result<(), opal_xlink::Error> {
-                let s = link.open_stream(ASSET_STREAM, STREAM_SIZE)?;
-                link.write_split(s, &storage, STREAM_SIZE as usize)
-            });
+            let writer = thread::Builder::new()
+                .name("asset-writer".into())
+                .spawn(move || -> Result<(), opal_xlink::Error> {
+                    let s = link.open_stream(ASSET_STREAM, STREAM_SIZE)?;
+                    link.write_split(s, &storage, STREAM_SIZE as usize)
+                })
+                .map_err(opal_xlink::Error::from)?;
             let read = self.call(
                 "readFromXLink",
                 vec![ASSET_STREAM.into(), handle.into(), (len as u64).into()],
             );
-            writer.join().expect("asset writer")?;
+            if read.is_err() {
+                // Frees the writer if it waits for room the device will never make.
+                self.link().close("asset upload failed");
+            }
+            let wrote = writer
+                .join()
+                .unwrap_or_else(|_| Err(opal_xlink::Error::Closed("asset writer failed".into())));
             read?;
+            wrote?;
             self.call("setAssetStorage", vec![handle.into(), (len as u64).into()])?;
         }
 

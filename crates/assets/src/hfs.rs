@@ -37,20 +37,23 @@ struct ForkData {
 }
 
 impl ForkData {
-    fn parse(b: &[u8]) -> Self {
-        let extents = (0..8)
-            .map(|i| (be_u32(b, 16 + i * 8), be_u32(b, 20 + i * 8)))
-            .filter(|&(_, count)| count > 0)
-            .collect();
-        Self {
-            logical_size: be_u64(b, 0),
-            total_blocks: be_u32(b, 12),
-            extents,
+    fn parse(b: &[u8]) -> Result<Self, Error> {
+        let mut extents = Vec::new();
+        for i in 0..8 {
+            let (start, count) = (be_u32(b, 16 + i * 8)?, be_u32(b, 20 + i * 8)?);
+            if count > 0 {
+                extents.push((start, count));
+            }
         }
+        Ok(Self {
+            logical_size: be_u64(b, 0)?,
+            total_blocks: be_u32(b, 12)?,
+            extents,
+        })
     }
 
     fn listed_blocks(&self) -> u64 {
-        self.extents.iter().map(|&(_, n)| u64::from(n)).sum()
+        blocks(&self.extents)
     }
 }
 
@@ -72,6 +75,8 @@ struct FileRecord {
 
 pub struct Volume<R> {
     reader: R,
+    /// Bytes in the volume; no file can be larger.
+    size: u64,
     block_size: u64,
     /// (parent ID, NFD name) -> entry
     catalog: HashMap<(u32, String), Entry>,
@@ -81,21 +86,23 @@ pub struct Volume<R> {
 
 impl<R: Read + Seek> Volume<R> {
     pub fn open(mut reader: R) -> Result<Self, Error> {
+        let size = reader.seek(SeekFrom::End(0))?;
         let mut header = [0u8; 512];
         reader.seek(SeekFrom::Start(VOLUME_HEADER_OFFSET))?;
         reader.read_exact(&mut header)?;
         if &header[0..2] != b"H+" && &header[0..2] != b"HX" {
             return Err(Error::Format("not an HFS Plus volume".into()));
         }
-        let block_size = u64::from(be_u32(&header, 40));
+        let block_size = u64::from(be_u32(&header, 40)?);
         if !block_size.is_power_of_two() || block_size < 512 {
             return Err(Error::Format(format!("bad block size {block_size}")));
         }
-        let extents_fork = ForkData::parse(&header[192..272]);
-        let catalog_fork = ForkData::parse(&header[272..352]);
+        let extents_fork = ForkData::parse(&header[192..272])?;
+        let catalog_fork = ForkData::parse(&header[272..352])?;
 
         let mut volume = Self {
             reader,
+            size,
             block_size,
             catalog: HashMap::new(),
             overflow: HashMap::new(),
@@ -167,12 +174,17 @@ impl<R: Read + Seek> Volume<R> {
                 extents.extend(records);
             }
         }
-        let available: u64 = extents.iter().map(|&(_, n)| u64::from(n)).sum::<u64>() * self.block_size;
+        let available = blocks(&extents).saturating_mul(self.block_size);
         if available < fork.logical_size {
             return Err(Error::Format(format!("file {file_id}: missing extents")));
         }
+        if fork.logical_size > self.size {
+            return Err(Error::Format(format!("file {file_id}: larger than the volume")));
+        }
 
-        let mut out = Vec::with_capacity(fork.logical_size as usize);
+        let mut out = Vec::new();
+        out.try_reserve_exact(usize::try_from(fork.logical_size).unwrap_or(usize::MAX))
+            .map_err(|_| Error::Format(format!("file {file_id}: too large")))?;
         for (start, count) in extents {
             let remaining = fork.logical_size - out.len() as u64;
             if remaining == 0 {
@@ -195,9 +207,9 @@ fn for_each_leaf_record(tree: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> Resu
         return Err(Error::Format("B-tree too small".into()));
     }
     // node 0: 14-byte descriptor, then the header record
-    let first_leaf = be_u32(tree, 14 + 10);
-    let node_size = usize::from(be_u16(tree, 14 + 18));
-    let total_nodes = be_u32(tree, 14 + 22) as usize;
+    let first_leaf = be_u32(tree, 14 + 10)?;
+    let node_size = usize::from(be_u16(tree, 14 + 18)?);
+    let total_nodes = be_u32(tree, 14 + 22)? as usize;
     if !node_size.is_power_of_two() || node_size < 512 {
         return Err(Error::Format(format!("bad B-tree node size {node_size}")));
     }
@@ -206,7 +218,7 @@ fn for_each_leaf_record(tree: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> Resu
     let mut visited = 0usize;
     while node_number != 0 {
         visited += 1;
-        if visited > total_nodes {
+        if visited > total_nodes.min(tree.len() / node_size) {
             return Err(Error::Format("B-tree loop".into()));
         }
         let node = tree
@@ -215,11 +227,14 @@ fn for_each_leaf_record(tree: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> Resu
         if node[8] as i8 != NODE_KIND_LEAF {
             return Err(Error::Format("B-tree leaf chain broken".into()));
         }
-        let records = usize::from(be_u16(node, 10));
+        let records = usize::from(be_u16(node, 10)?);
+        if 14 + 2 * records > node_size {
+            return Err(Error::Format("B-tree node overfull".into()));
+        }
         // record offsets are stored backwards from the end of the node
         for i in 0..records {
-            let offset = usize::from(be_u16(node, node_size - 2 * (i + 1)));
-            let key_len = usize::from(be_u16(node, offset));
+            let offset = usize::from(be_u16(node, node_size - 2 * (i + 1))?);
+            let key_len = usize::from(be_u16(node, offset)?);
             let key_end = offset + 2 + key_len;
             let record_start = key_end + (key_end & 1);
             if record_start > node_size {
@@ -227,7 +242,7 @@ fn for_each_leaf_record(tree: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> Resu
             }
             visit(&node[offset + 2..key_end], &node[record_start..])?;
         }
-        node_number = be_u32(node, 0) as usize;
+        node_number = be_u32(node, 0)? as usize;
     }
     Ok(())
 }
@@ -236,22 +251,27 @@ fn parse_catalog_tree(tree: &[u8]) -> Result<HashMap<(u32, String), Entry>, Erro
     let mut catalog = HashMap::new();
     for_each_leaf_record(tree, |key, record| {
         // key: parent ID, then UTF-16BE name
-        let parent = be_u32(key, 0);
-        let name_len = usize::from(be_u16(key, 4));
-        let units: Vec<u16> = (0..name_len).map(|i| be_u16(key, 6 + i * 2)).collect();
+        let parent = be_u32(key, 0)?;
+        let name_len = usize::from(be_u16(key, 4)?);
+        let units: Vec<u16> = (0..name_len)
+            .map(|i| be_u16(key, 6 + i * 2))
+            .collect::<Result<_, _>>()?;
         let name: String = String::from_utf16_lossy(&units).nfd().collect();
-        let entry = match be_u16(record, 0) {
-            RECORD_FOLDER => Entry::Folder { id: be_u32(record, 8) },
+        let entry = match be_u16(record, 0)? {
+            RECORD_FOLDER => Entry::Folder { id: be_u32(record, 8)? },
             RECORD_FILE => {
+                let record = record
+                    .get(..168)
+                    .ok_or_else(|| Error::Format("short catalog record".into()))?;
                 let file_type = &record[48..52];
                 let creator = &record[52..56];
-                let special = be_u32(record, 44);
+                let special = be_u32(record, 44)?;
                 Entry::File(FileRecord {
-                    id: be_u32(record, 8),
-                    mode: be_u16(record, 42),
+                    id: be_u32(record, 8)?,
+                    mode: be_u16(record, 42)?,
                     owner_flags: record[41],
                     link_target: (file_type == b"hlnk" && creator == b"hfs+").then_some(special),
-                    data: ForkData::parse(&record[88..168]),
+                    data: ForkData::parse(&record[88..168])?,
                 })
             }
             _ => return Ok(()), // thread records
@@ -271,13 +291,16 @@ fn parse_extents_tree(tree: &[u8]) -> Result<OverflowMap, Error> {
     }
     for_each_leaf_record(tree, |key, record| {
         // key: fork type, pad, file ID, start block
-        let fork_type = key[0];
-        let file_id = be_u32(key, 2);
-        let start_block = be_u32(key, 6);
-        let extents = (0..8)
-            .map(|i| (be_u32(record, i * 8), be_u32(record, i * 8 + 4)))
-            .filter(|&(_, n)| n > 0)
-            .collect();
+        let fork_type = *key.first().ok_or_else(|| Error::Format("empty extents key".into()))?;
+        let file_id = be_u32(key, 2)?;
+        let start_block = be_u32(key, 6)?;
+        let mut extents = Vec::new();
+        for i in 0..8 {
+            let (start, count) = (be_u32(record, i * 8)?, be_u32(record, i * 8 + 4)?);
+            if count > 0 {
+                extents.push((start, count));
+            }
+        }
         map.entry((file_id, fork_type))
             .or_default()
             .push((start_block, extents));
@@ -286,14 +309,26 @@ fn parse_extents_tree(tree: &[u8]) -> Result<OverflowMap, Error> {
     Ok(map)
 }
 
-fn be_u16(b: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes(b[at..at + 2].try_into().unwrap())
+/// Blocks in a list of extents.
+fn blocks(extents: &[(u32, u32)]) -> u64 {
+    extents.iter().map(|&(_, n)| u64::from(n)).sum()
 }
 
-fn be_u32(b: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
+/// `N` bytes at `at`, or an error if the record is too short.
+fn bytes<const N: usize>(b: &[u8], at: usize) -> Result<[u8; N], Error> {
+    b.get(at..at.saturating_add(N))
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| Error::Format("record too short".into()))
 }
 
-fn be_u64(b: &[u8], at: usize) -> u64 {
-    u64::from_be_bytes(b[at..at + 8].try_into().unwrap())
+fn be_u16(b: &[u8], at: usize) -> Result<u16, Error> {
+    bytes(b, at).map(u16::from_be_bytes)
+}
+
+fn be_u32(b: &[u8], at: usize) -> Result<u32, Error> {
+    bytes(b, at).map(u32::from_be_bytes)
+}
+
+fn be_u64(b: &[u8], at: usize) -> Result<u64, Error> {
+    bytes(b, at).map(u64::from_be_bytes)
 }

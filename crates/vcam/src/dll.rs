@@ -155,7 +155,7 @@ impl Activate {
 
 impl IMFActivate_Impl for Activate_Impl {
     fn ActivateObject(&self, riid: *const GUID, ppv: *mut *mut c_void) -> Result<()> {
-        let mut slot = self.source.lock().unwrap();
+        let mut slot = self.source.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let source = match &*slot {
             Some(s) => s.clone(),
             None => {
@@ -168,14 +168,22 @@ impl IMFActivate_Impl for Activate_Impl {
     }
 
     fn ShutdownObject(&self) -> Result<()> {
-        if let Some(s) = self.source.lock().unwrap().take() {
+        if let Some(s) = self
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             unsafe { s.Shutdown()? };
         }
         Ok(())
     }
 
     fn DetachObject(&self) -> Result<()> {
-        self.source.lock().unwrap().take();
+        self.source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         Ok(())
     }
 }

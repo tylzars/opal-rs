@@ -1,5 +1,6 @@
 //! Live preview: a thread that fetches frames and shrinks them to a small RGB image.
 
+use crate::LockExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ pub struct Handle {
 
 impl Handle {
     pub fn running(&self) -> bool {
-        self.shared.lock().unwrap().running
+        self.shared.locked().running
     }
 
     /// Time since the last start, if any.
@@ -48,25 +49,25 @@ impl Handle {
 
     /// True while frames keep arriving.
     pub fn live(&self) -> bool {
-        let s = self.shared.lock().unwrap();
+        let s = self.shared.locked();
         s.running && s.last_frame.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
 
     pub fn take_frame(&self) -> Option<(Vec<u8>, [usize; 2])> {
-        self.shared.lock().unwrap().frame.take()
+        self.shared.locked().frame.take()
     }
 
     pub fn take_error(&self) -> Option<String> {
-        self.shared.lock().unwrap().error.take()
+        self.shared.locked().error.take()
     }
 
     /// Last error without clearing it.
     pub fn error(&self) -> Option<String> {
-        self.shared.lock().unwrap().error.clone()
+        self.shared.locked().error.clone()
     }
 
     pub fn stop(&self) {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.locked();
         s.generation += 1;
         s.running = false;
         s.last_frame = None;
@@ -74,7 +75,7 @@ impl Handle {
 
     pub fn start(&mut self, ctx: egui::Context, source: Source) {
         let generation = {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.locked();
             s.generation += 1;
             s.running = true;
             s.error = None;
@@ -84,10 +85,10 @@ impl Handle {
         self.started = Some(Instant::now());
         let shared = self.shared.clone();
         std::thread::spawn(move || {
-            let current = || shared.lock().unwrap().generation == generation;
+            let current = || shared.locked().generation == generation;
             // Hands a frame to the window; false once this thread is no longer wanted.
             let store = |rgb: Vec<u8>, size: [usize; 2]| {
-                let mut s = shared.lock().unwrap();
+                let mut s = shared.locked();
                 if s.generation != generation {
                     return false;
                 }
@@ -108,7 +109,7 @@ impl Handle {
                     Err(std::io::Error::other("not found; is it plugged in?")),
                 ),
             };
-            let mut s = shared.lock().unwrap();
+            let mut s = shared.locked();
             if s.generation == generation {
                 if let Err(e) = result {
                     s.error = Some(format!("{name}: {e}"));
@@ -129,6 +130,10 @@ fn from_service(current: &dyn Fn() -> bool, store: &dyn Fn(Vec<u8>, [usize; 2]) 
             Ok((words, data)) => {
                 let mut n = words.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
                 if let (Some(w), Some(h)) = (n.next(), n.next())
+                    && (2..=4096).contains(&w)
+                    && (2..=4096).contains(&h)
+                    && w % 2 == 0
+                    && h % 2 == 0
                     && data.len() >= w * h * 3 / 2
                     && !store(nv12_to_rgb_small(&data, w, h, 1), [w, h])
                 {

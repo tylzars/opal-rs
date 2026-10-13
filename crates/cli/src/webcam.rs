@@ -7,18 +7,18 @@ use anyhow::{Context, Result};
 use opal_c1::{Led, Resolution};
 use opal_dai::device::Device;
 
-/// Time for the camera to finish stopping before the session ends.
-const STOP_SETTLE: Duration = Duration::from_secs(3);
-
 pub fn run(dir: &Path, flicker: &str) -> Result<()> {
     let banding = crate::mains::mode(flicker).context("flicker is off, 50, 60 or auto")?;
     crate::on_stop()?;
-    let booted = crate::boot(dir, true)?;
+    let booted = crate::boot(dir, true, false)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;
     let sensor = crate::sensor_name(&dev)?;
     let pipeline = opal_c1::pipeline(dir, &sensor, Resolution::P1080, true, banding)?;
     let streams = dev.start_pipeline(&pipeline)?;
-    let (control, led) = (streams[opal_c1::CONTROL_STREAM], streams[opal_c1::LED_STREAM]);
+    let (control, led) = (
+        crate::daemon::stream(&streams, opal_c1::CONTROL_STREAM)?,
+        crate::daemon::stream(&streams, opal_c1::LED_STREAM)?,
+    );
     let link = dev.link().clone();
     link.write(control, &opal_c1::start_control().to_packet())?;
     link.write(led, &Led::White.packet())?;
@@ -30,7 +30,7 @@ pub fn run(dir: &Path, flicker: &str) -> Result<()> {
     }
     let _ = link.write(control, &opal_c1::stop_control().to_packet());
     let _ = link.write(led, &Led::Off.packet());
-    std::thread::sleep(STOP_SETTLE);
+    std::thread::sleep(crate::daemon::STOP_SETTLE);
     dev.close();
     Ok(())
 }

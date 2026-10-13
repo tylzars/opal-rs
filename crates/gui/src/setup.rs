@@ -1,5 +1,6 @@
 //! First run: opens Opal's download page and extracts the camera files from the disk image the user picks.
 
+use crate::LockExt;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,8 @@ pub struct Setup {
     /// The path typed in, or picked.
     path: Arc<Mutex<String>>,
     can_browse: bool,
+    /// Set while the file dialog is open, so a second click does not open another.
+    picking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A command for one of the opal-rs programs, without a console window on Windows.
@@ -48,6 +51,7 @@ impl Setup {
             progress: Arc::default(),
             path: Arc::default(),
             can_browse: can_browse(),
+            picking: Arc::default(),
         };
         let (phase, ctx) = (setup.phase.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -56,7 +60,7 @@ impl Setup {
                 .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success());
-            *phase.lock().unwrap() = if ok { Phase::Ready } else { Phase::Missing };
+            *phase.locked() = if ok { Phase::Ready } else { Phase::Missing };
             ctx.request_repaint();
         });
         setup
@@ -64,7 +68,7 @@ impl Setup {
 
     /// True until the camera files are in place.
     pub fn blocking(&self) -> bool {
-        *self.phase.lock().unwrap() != Phase::Ready
+        *self.phase.locked() != Phase::Ready
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
@@ -72,7 +76,7 @@ impl Setup {
     }
 
     fn contents(&mut self, ui: &mut Ui) {
-        let phase = self.phase.lock().unwrap().clone();
+        let phase = self.phase.locked().clone();
         ui.add_space(24.0);
         ui.vertical_centered(|ui| ui.heading("Set up Opal C1"));
         ui.add_space(12.0);
@@ -81,8 +85,8 @@ impl Setup {
             return;
         }
         ui.label(
-            "The camera needs a few files from Opal's own app, Opal Composer: its firmware and the networks it runs. \
-             They are copied out of the app's disk image on this computer; nothing is sent anywhere.",
+            "Opal C1 needs its firmware and AI models, which come with Opal's free app, Opal Composer. \
+             This is needed once.",
         );
         ui.add_space(12.0);
         ui.label(RichText::new("1. Download Opal Composer 2.0 from Opal's site.").strong());
@@ -90,38 +94,49 @@ impl Setup {
             open_page();
         }
         ui.add_space(12.0);
-        ui.label(RichText::new(format!("2. Choose the file you downloaded, {DMG_NAME}.")).strong());
+        ui.label(RichText::new(format!("2. Choose the downloaded file, {DMG_NAME}.")).strong());
         let busy = phase == Phase::Extracting;
         ui.add_enabled_ui(!busy, |ui| {
-            if self.can_browse && ui.button("Choose the file").clicked() {
-                let (path, phase, progress, ctx) = (
+            let picking = self.picking.load(std::sync::atomic::Ordering::Relaxed);
+            if self.can_browse && ui.add_enabled(!picking, egui::Button::new("Choose the file")).clicked() {
+                self.picking.store(true, std::sync::atomic::Ordering::Relaxed);
+                let (path, phase, progress, ctx, picking) = (
                     self.path.clone(),
                     self.phase.clone(),
                     self.progress.clone(),
                     ui.ctx().clone(),
+                    self.picking.clone(),
                 );
                 std::thread::spawn(move || {
+                    // Cleared however the dialog ends.
+                    struct Done(Arc<std::sync::atomic::AtomicBool>);
+                    impl Drop for Done {
+                        fn drop(&mut self) {
+                            self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    let _done = Done(picking);
                     let mut dialog = file_dialog("Choose the Opal Composer disk image", "Disk images", &["dmg"]);
                     if let Ok(out) = dialog.output()
                         && out.status.success()
                     {
                         let picked = String::from_utf8_lossy(&out.stdout).trim().to_owned();
                         if !picked.is_empty() {
-                            *path.lock().unwrap() = picked.clone();
+                            *path.locked() = picked.clone();
                             extract(picked, phase, progress, ctx);
                         }
                     }
                 });
             }
             ui.horizontal(|ui| {
-                let mut text = self.path.lock().unwrap().clone();
+                let mut text = self.path.locked().clone();
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut text)
                         .hint_text("or type the path to the disk image")
                         .desired_width(ui.available_width() - 90.0),
                 );
                 if field.changed() {
-                    *self.path.lock().unwrap() = text.clone();
+                    *self.path.locked() = text.clone();
                 }
                 if ui
                     .add_enabled(!text.trim().is_empty(), egui::Button::new("Use it"))
@@ -143,7 +158,7 @@ impl Setup {
                     ui.spinner();
                     ui.label("Copying the camera files out of the disk image...");
                 });
-                for line in self.progress.lock().unwrap().iter() {
+                for line in self.progress.locked().iter() {
                     ui.label(RichText::new(line).color(WEAK).small());
                 }
             }
@@ -157,8 +172,8 @@ impl Setup {
 
 /// Unpacks the camera files from `dmg`, then starts the service.
 fn extract(dmg: String, phase: Arc<Mutex<Phase>>, progress: Arc<Mutex<Vec<String>>>, ctx: egui::Context) {
-    *phase.lock().unwrap() = Phase::Extracting;
-    progress.lock().unwrap().clear();
+    *phase.locked() = Phase::Extracting;
+    progress.locked().clear();
     ctx.request_repaint();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
@@ -171,7 +186,7 @@ fn extract(dmg: String, phase: Arc<Mutex<Phase>>, progress: Arc<Mutex<Vec<String
             if let Some(out) = child.stdout.take() {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
                     unknown |= line.contains("unknown disk image");
-                    progress.lock().unwrap().push(line);
+                    progress.locked().push(line);
                     ctx.request_repaint();
                 }
             }
@@ -184,7 +199,7 @@ fn extract(dmg: String, phase: Arc<Mutex<Phase>>, progress: Arc<Mutex<Vec<String
             let ok = child.wait().is_ok_and(|s| s.success());
             if unknown {
                 return Err(format!(
-                    "That file is not Opal Composer 2.0 (build 24). The one you need is {DMG_NAME}."
+                    "That file is not Opal Composer 2.0 (build 24). Choose {DMG_NAME}."
                 ));
             }
             if !ok {
@@ -200,7 +215,7 @@ fn extract(dmg: String, phase: Arc<Mutex<Phase>>, progress: Arc<Mutex<Vec<String
             }
             Ok(())
         })();
-        *phase.lock().unwrap() = match result {
+        *phase.locked() = match result {
             Ok(()) => Phase::Ready,
             Err(e) => Phase::Failed(e),
         };

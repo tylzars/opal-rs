@@ -2,7 +2,7 @@
 
 use std::thread;
 
-/// How skin-like a chroma pair is, 0 to 1 (full-range BT.601, skin sits around U 110, V 150).
+/// How skin-like a chroma pair is, 0 to 1 (full-range BT.601, skin sits around U 110, V 152).
 fn skin(u: u8, v: u8) -> f32 {
     let (du, dv) = ((u as f32 - 110.0) / 16.0, (v as f32 - 152.0) / 14.0);
     (1.0 - (du * du + dv * dv).sqrt() / 1.5).clamp(0.0, 1.0)

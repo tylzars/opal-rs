@@ -3,7 +3,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, mpsc};
+
+use crate::LockExt;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -77,6 +79,8 @@ struct State {
     streams: HashMap<u32, Stream>,
     next_stream: u32,
     responses: HashMap<i32, Header>,
+    /// Requests given up on; their replies are dropped if they come after all.
+    abandoned: std::collections::HashSet<i32>,
     closed: Option<String>,
 }
 
@@ -91,11 +95,13 @@ struct Shared {
     last_heard: AtomicU64,
     /// The last packet headers each way, for working out why a device went quiet.
     trace: Mutex<VecDeque<String>>,
+    /// Set once the link is closed, so USB reads and writes in progress give up.
+    stop: Arc<AtomicBool>,
     /// Set while this side is ending the session, when silence is expected.
     ending: AtomicBool,
 }
 
-const TRACE_LEN: usize = 16;
+const TRACE_LEN: usize = 48;
 
 fn note(shared: &Shared, dir: &str, h: &Header) {
     let kind = match h.kind % RESP {
@@ -114,7 +120,7 @@ fn note(shared: &Shared, dir: &str, h: &Header) {
         h.stream,
         h.size
     );
-    let mut t = shared.trace.lock().unwrap();
+    let mut t = shared.trace.locked();
     if t.len() == TRACE_LEN {
         t.pop_front();
     }
@@ -123,8 +129,8 @@ fn note(shared: &Shared, dir: &str, h: &Header) {
 
 /// Recent packets each way and how full each stream is.
 fn dump(shared: &Shared) -> String {
-    let mut out: Vec<String> = shared.trace.lock().unwrap().iter().cloned().collect();
-    let st = shared.state.lock().unwrap();
+    let mut out: Vec<String> = shared.trace.locked().iter().cloned().collect();
+    let st = shared.state.locked();
     let mut ids: Vec<_> = st.streams.keys().copied().collect();
     ids.sort();
     for id in ids {
@@ -144,7 +150,7 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
     loop {
         let (header, payload) = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(m) => m,
-            Err(mpsc::RecvTimeoutError::Timeout) if shared.state.lock().unwrap().closed.is_none() => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) if shared.state.locked().closed.is_none() => continue,
             Err(_) => break,
         };
         let result = writer.write_all(&header).and_then(|_| {
@@ -157,14 +163,21 @@ fn write_loop(shared: Arc<Shared>, mut writer: Writer, rx: mpsc::Receiver<([u8; 
         // Noted once sent, so a trace shows whether writes were still getting through.
         note(&shared, "out", &Header::decode(&header));
         if let Err(e) = result {
-            let mut st = shared.state.lock().unwrap();
-            st.closed.get_or_insert_with(|| e.to_string());
-            drop(st);
-            shared.cond.notify_all();
+            if !shared.ending.load(Ordering::Relaxed) && shared.state.locked().closed.is_none() {
+                eprintln!("xlink: write failed: {e}");
+            }
+            shut(&shared, e.to_string());
             break;
         }
     }
 }
+
+/// How long a write may wait for room and for the device to acknowledge it. Writes are small control messages
+/// or chunks of the files sent at start; a working device answers in milliseconds.
+const WRITE_WAIT: Duration = Duration::from_secs(20);
+
+/// Largest packet taken from the device.
+const MAX_PACKET: u32 = 64 << 20;
 
 /// How long the reader waits for the device before queueing its reads again.
 const QUIET_STEP: Duration = Duration::from_secs(5);
@@ -172,7 +185,7 @@ const QUIET_STEP: Duration = Duration::from_secs(5);
 static NEXT_ID: AtomicI32 = AtomicI32::new(0xa);
 
 fn next_id() -> i32 {
-    NEXT_ID.fetch_add(1, Ordering::Relaxed) + 1
+    NEXT_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -199,7 +212,8 @@ pub struct StreamId(u32);
 impl Link {
     /// Claims interface 0, starts the reader and pings the device.
     pub fn connect(info: &nusb::DeviceInfo, timeout: Duration) -> Result<Self, Error> {
-        let (reader, writer) = usb::open(info)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reader, writer) = usb::open(info, stop.clone())?;
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -208,6 +222,7 @@ impl Link {
             started: Instant::now(),
             last_heard: AtomicU64::new(0),
             trace: Mutex::new(VecDeque::new()),
+            stop,
             ending: AtomicBool::new(false),
         });
         let s = shared.clone();
@@ -242,7 +257,7 @@ impl Link {
         let id = h.id;
         self.send(&h, payload)?;
         let deadline = timeout.map(|t| Instant::now() + t);
-        let mut st = self.shared.state.lock().unwrap();
+        let mut st = self.shared.state.locked();
         loop {
             if let Some(r) = st.responses.remove(&id) {
                 return Ok(r);
@@ -250,7 +265,17 @@ impl Link {
             if let Some(why) = &st.closed {
                 return Err(Error::Closed(why.clone()));
             }
-            st = wait(&self.shared.cond, st, deadline)?;
+            st = match wait(&self.shared.cond, st, deadline) {
+                Ok(st) => st,
+                Err(e) => {
+                    // A reply that came in just now is dropped; one still to come will be.
+                    let mut st = self.shared.state.locked();
+                    if st.responses.remove(&id).is_none() {
+                        st.abandoned.insert(id);
+                    }
+                    return Err(e);
+                }
+            };
         }
     }
 
@@ -258,7 +283,7 @@ impl Link {
     pub fn open_stream(&self, name: &str, write_size: u32) -> Result<StreamId, Error> {
         let write_size = write_size.div_ceil(64) * 64;
         let id = {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.state.locked();
             let id = stream_for(&mut st, name);
             let s = st.streams.get_mut(&id).unwrap();
             s.write_size = s.write_size.max(write_size);
@@ -279,20 +304,31 @@ impl Link {
         Ok(StreamId(id))
     }
 
-    /// Sends one packet. Blocks until the device has room for it and acknowledges it.
+    /// Sends one packet. Blocks until the device has room for it and acknowledges it; a device that does neither
+    /// within `WRITE_WAIT` has stopped working, and the link is closed.
     pub fn write(&self, stream: StreamId, data: &[u8]) -> Result<(), Error> {
-        let n = data.len() as u32;
+        let n = u32::try_from(data.len()).map_err(|_| Error::Refused("packet too big"))?;
+        let deadline = Some(Instant::now() + WRITE_WAIT);
         {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.state.locked();
             loop {
                 if let Some(why) = &st.closed {
                     return Err(Error::Closed(why.clone()));
                 }
                 let s = st.streams.get(&stream.0).ok_or(Error::Refused("unknown stream"))?;
+                if n > s.write_size {
+                    return Err(Error::Refused("packet too big"));
+                }
                 if s.remote_packets < MAX_PACKETS && s.remote_fill + n <= s.write_size {
                     break;
                 }
-                st = wait(&self.shared.cond, st, None)?;
+                st = match wait(&self.shared.cond, st, deadline) {
+                    Ok(st) => st,
+                    Err(e) => {
+                        self.close("device stopped taking writes");
+                        return Err(e);
+                    }
+                };
             }
             let s = st.streams.get_mut(&stream.0).unwrap();
             s.remote_fill += n;
@@ -306,7 +342,14 @@ impl Link {
             flags: ACK,
             ..Default::default()
         };
-        let r = self.request(h, data, None)?;
+        let r = match self.request(h, data, deadline.map(|d| d.saturating_duration_since(Instant::now()))) {
+            Ok(r) => r,
+            Err(e @ Error::Timeout) => {
+                self.close("device stopped acknowledging writes");
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         if r.flags & ACK == 0 {
             return Err(Error::Refused("write"));
         }
@@ -325,7 +368,7 @@ impl Link {
     pub fn read(&self, name: &str, timeout: Option<Duration>) -> Result<Vec<u8>, Error> {
         let deadline = timeout.map(|t| Instant::now() + t);
         let (stream, packet) = {
-            let mut st = self.shared.state.lock().unwrap();
+            let mut st = self.shared.state.locked();
             loop {
                 let id = stream_for(&mut st, name);
                 if let Some(p) = st.streams.get_mut(&id).unwrap().incoming.pop_front() {
@@ -345,8 +388,15 @@ impl Link {
             flags: ACK,
             ..Default::default()
         };
-        self.request(h, &[], None)?;
-        Ok(packet)
+        // Bounded like a write: a device that does not take the release has stopped working.
+        match self.request(h, &[], Some(WRITE_WAIT)) {
+            Ok(_) => Ok(packet),
+            Err(e @ Error::Timeout) => {
+                self.close("device stopped acknowledging releases");
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Time since the device last sent anything.
@@ -355,25 +405,37 @@ impl Link {
         self.shared.started.elapsed().saturating_sub(heard)
     }
 
+    /// Asks the device to restart, as depthai does when it closes a device: the application stops and the camera
+    /// comes back as its bootloader. The device may drop off the bus before it answers, which is fine.
+    pub fn reset_device(&self, timeout: Duration) {
+        self.ending();
+        let h = Header {
+            id: next_id(),
+            kind: RESET_REQ,
+            flags: ACK,
+            ..Default::default()
+        };
+        let _ = self.request(h, &[], Some(timeout));
+    }
+
     /// Tells the link the session is ending, so the device going quiet is not reported.
     pub fn ending(&self) {
         self.shared.ending.store(true, Ordering::Relaxed);
     }
 
-    /// Ends the link from this side, for a device that stopped answering. Everything waiting on it returns.
+    /// Ends the link from this side: at the end of a session, or for a device that stopped answering. Everything
+    /// waiting on it returns, and the reader and writer threads stop within a second.
     pub fn close(&self, why: &str) {
-        let mut st = self.shared.state.lock().unwrap();
-        if st.closed.is_none() {
-            st.closed = Some(why.into());
+        if !self.shared.ending.load(Ordering::Relaxed) && self.shared.state.locked().closed.is_none() {
+            eprintln!("xlink: closing: {why}");
         }
-        drop(st);
-        self.shared.cond.notify_all();
+        shut(&self.shared, why.into());
     }
 
-    /// Waits until the reader sees the link go down.
+    /// Waits until the link is closed, from either side.
     pub fn wait_closed(&self, timeout: Duration) -> bool {
         let deadline = Some(Instant::now() + timeout);
-        let mut st = self.shared.state.lock().unwrap();
+        let mut st = self.shared.state.locked();
         while st.closed.is_none() {
             match wait(&self.shared.cond, st, deadline) {
                 Ok(g) => st = g,
@@ -381,6 +443,14 @@ impl Link {
             }
         }
         true
+    }
+}
+
+/// Stops the reader and writer threads; the USB interface is freed when they have stopped, within a second.
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.ending();
+        self.close("dropped");
     }
 }
 
@@ -400,8 +470,9 @@ fn stream_for(st: &mut State, name: &str) -> u32 {
     id
 }
 
-/// The device closing a stream it writes to. Refused while packets it sent are unread. Once closed, the stream's
-/// name is free, so the device can open it again (as it does to make room for bigger packets) and gets a new id.
+/// The device closing a stream it writes to. Refused while packets it sent are unread. A stream only the device
+/// writes to is forgotten, so the device can open it again under a new id (as it does to make room for bigger
+/// packets); one this side also writes to (`write_size` above zero, as every pipeline stream) keeps its id.
 fn close_remote(st: &mut State, id: u32) -> bool {
     let Some(s) = st.streams.get_mut(&id) else {
         return true;
@@ -421,13 +492,16 @@ fn wait<'a>(
     deadline: Option<Instant>,
 ) -> Result<std::sync::MutexGuard<'a, State>, Error> {
     match deadline {
-        None => Ok(cond.wait(guard).unwrap()),
+        None => Ok(cond.wait(guard).unwrap_or_else(PoisonError::into_inner)),
         Some(d) => {
             let now = Instant::now();
             if now >= d {
                 return Err(Error::Timeout);
             }
-            Ok(cond.wait_timeout(guard, d - now).unwrap().0)
+            Ok(cond
+                .wait_timeout(guard, d - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0)
         }
     }
 }
@@ -445,7 +519,7 @@ fn reply(shared: &Shared, req: &Header, stream: u32, size: u32, name: &str, flag
 }
 
 fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
-    // Seconds of silence so far, counted in steps of QUIET_STEP.
+    // Periods of QUIET_STEP with nothing from the device, in a row.
     let mut quiet = 0;
     let why = loop {
         let h = match reader.read_exact(HEADER_LEN, Some(QUIET_STEP)) {
@@ -457,7 +531,7 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
                 Header::decode(&b)
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                if shared.state.lock().unwrap().closed.is_some() {
+                if shared.state.locked().closed.is_some() {
                     break "closed".into();
                 }
                 if shared.ending.load(Ordering::Relaxed) {
@@ -479,20 +553,26 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
         note(&shared, "in", &h);
         match h.kind {
             WRITE_REQ => {
+                // A 4K frame is 12 MB; a bigger size means the link lost its place.
+                if h.size > MAX_PACKET {
+                    break format!("packet of {} bytes", h.size);
+                }
                 let data = match reader.read_exact(h.size as usize, None) {
                     Ok(d) => d,
                     Err(e) => break e.to_string(),
                 };
+                // Acknowledged before anyone can read it, so the release that follows the read is always queued
+                // after the acknowledgement. The camera hung when a release overtook it.
+                reply(&shared, &h, h.stream, h.size, "", ACK);
                 {
-                    let mut st = shared.state.lock().unwrap();
+                    let mut st = shared.state.locked();
                     st.streams.entry(h.stream).or_default().incoming.push_back(data);
                 }
                 shared.cond.notify_all();
-                reply(&shared, &h, h.stream, h.size, "", ACK);
             }
             READ_REL_REQ => {
                 {
-                    let mut st = shared.state.lock().unwrap();
+                    let mut st = shared.state.locked();
                     if let Some(s) = st.streams.get_mut(&h.stream) {
                         s.remote_fill = s.remote_fill.saturating_sub(h.size);
                         s.remote_packets = s.remote_packets.saturating_sub(1);
@@ -502,11 +582,11 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
                 reply(&shared, &h, h.stream, 0, "", ACK);
             }
             CREATE_STREAM_REQ => {
-                let id = stream_for(&mut shared.state.lock().unwrap(), &h.name);
+                let id = stream_for(&mut shared.state.locked(), &h.name);
                 reply(&shared, &h, id, h.size, &h.name, ACK);
             }
             CLOSE_STREAM_REQ => {
-                let closed = close_remote(&mut shared.state.lock().unwrap(), h.stream);
+                let closed = close_remote(&mut shared.state.locked(), h.stream);
                 reply(&shared, &h, h.stream, 0, "", if closed { ACK } else { NACK });
             }
             PING_REQ => reply(&shared, &h, 0, 0, "", ACK),
@@ -515,13 +595,28 @@ fn read_loop(shared: Arc<Shared>, mut reader: Reader) {
                 break "device reset".into();
             }
             k if (RESP..RESP + 7).contains(&k) => {
-                shared.state.lock().unwrap().responses.insert(h.id, h);
+                let mut st = shared.state.locked();
+                if !st.abandoned.remove(&h.id) {
+                    st.responses.insert(h.id, h);
+                }
                 shared.cond.notify_all();
             }
             k => break format!("unexpected event type {k}"),
         }
     };
-    shared.state.lock().unwrap().closed.get_or_insert(why);
+    if !shared.ending.load(Ordering::Relaxed) {
+        eprintln!(
+            "xlink: link down: {why}\nxlink: last packets and stream state:\n{}",
+            dump(&shared)
+        );
+    }
+    shut(&shared, why);
+}
+
+/// Marks the link closed, wakes everything waiting on it and makes USB transfers in progress give up.
+fn shut(shared: &Shared, why: String) {
+    shared.state.locked().closed.get_or_insert(why);
+    shared.stop.store(true, Ordering::Relaxed);
     shared.cond.notify_all();
 }
 

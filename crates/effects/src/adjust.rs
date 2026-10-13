@@ -75,7 +75,7 @@ fn rotate_hue(c: [f32; 3], degrees: f32) -> [f32; 3] {
     out.map(|v| v + shift)
 }
 
-/// How much a hue belongs to the colour centred on `centre`: 1 at the centre, 0 at the neighbouring colours.
+/// How much a hue belongs to colour `i` of [`COLOURS`]: 1 at its centre, 0 at the neighbouring colours.
 fn weight(hue: f32, i: usize) -> f32 {
     let n = COLOURS.len();
     let centre = COLOURS[i].1;

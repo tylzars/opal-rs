@@ -125,10 +125,6 @@ pub const ASSETS: &[Asset] = &[
     },
 ];
 
-pub fn asset(file_name: &str) -> Option<&'static Asset> {
-    ASSETS.iter().find(|a| a.file_name == file_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

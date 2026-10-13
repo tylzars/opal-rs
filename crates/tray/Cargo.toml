@@ -10,7 +10,7 @@ name = "opal-rs-tray"
 path = "src/main.rs"
 
 [dependencies]
-opal-ipc = { version = "0.1.0", path = "../ipc" }
+opal-ipc = { path = "../ipc" }
 
 [target.'cfg(unix)'.dependencies]
 ksni = { version = "0.3.6", features = ["blocking"] }

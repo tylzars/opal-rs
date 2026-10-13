@@ -150,8 +150,11 @@ impl Font {
 
 /// Scales an RGBA picture to `height` pixels tall, keeping its shape.
 pub fn scale(src: &Rgba, height: usize) -> Rgba {
-    let height = height.max(1);
-    let width = (src.width * height / src.height.max(1)).max(1);
+    // At most MAX_SIDE either way, whatever the shape.
+    const MAX_SIDE: usize = 8192;
+    let (sw, sh) = (src.width.max(1), src.height.max(1));
+    let height = height.min(MAX_SIDE).min(MAX_SIDE * sh / sw).max(1);
+    let width = (sw * height / sh).clamp(1, MAX_SIDE);
     let mut out = Rgba::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -252,8 +255,7 @@ pub fn composite(
                 continue;
             }
             let c = yuv(&img.data[(sy * img.width + sx) * 4..][..3]);
-            let at = width * height + cy * width + 2 * cx;
-            let uv = &mut chroma[at - width * height..][..2];
+            let uv = &mut chroma[cy * width + 2 * cx..][..2];
             for k in 0..2 {
                 uv[k] = (uv[k] as f32 + (c[k + 1] - uv[k] as f32) * a).round() as u8;
             }
@@ -272,6 +274,13 @@ mod tests {
         ]
         .iter()
         .find_map(|p| Font::load(&std::fs::read(p).ok()?))
+    }
+
+    #[test]
+    fn wide_picture_stays_within_limits() {
+        let img = Rgba::new(20000, 2);
+        let s = scale(&img, 1080);
+        assert!(s.width <= 8192 && s.height >= 1, "{}x{}", s.width, s.height);
     }
 
     #[test]

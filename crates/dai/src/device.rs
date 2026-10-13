@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use opal_xlink::{Found, Link, StreamId};
+use opal_xlink::{Found, Link, LockExt, StreamId};
 
 use crate::msgpack::Value;
 use crate::nop;
@@ -97,14 +97,20 @@ fn monotonic() -> Timestamp {
     }
 }
 
-/// A steady clock from when it was first read; the camera only needs it to move forward evenly.
-#[cfg(not(unix))]
+/// Time since the computer started, like Linux's monotonic clock. The camera hung a second into streaming when
+/// given a clock that started near zero.
+#[cfg(windows)]
 fn monotonic() -> Timestamp {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let t = START.get_or_init(std::time::Instant::now).elapsed();
+    use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+    let (mut count, mut freq) = (0i64, 0i64);
+    unsafe {
+        QueryPerformanceCounter(&mut count);
+        QueryPerformanceFrequency(&mut freq);
+    }
+    let freq = freq.max(1);
     Timestamp {
-        sec: t.as_secs() as i64,
-        nsec: t.subsec_nanos() as i64,
+        sec: count / freq,
+        nsec: (count % freq) * 1_000_000_000 / freq,
     }
 }
 
@@ -113,6 +119,8 @@ pub struct Device {
     link: Arc<Link>,
     rpc: Mutex<StreamId>,
     stop: Arc<AtomicBool>,
+    /// Set when the session ends for a restart: see [`Device::restart_on_close`].
+    restart: AtomicBool,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -121,15 +129,23 @@ impl Device {
     pub fn connect(found: &Found, on_log: impl Fn(LogMessage) + Send + 'static) -> Result<Self, Error> {
         let link = Arc::new(Link::connect(&found.info, Duration::from_secs(5))?);
         let rpc = link.open_stream(RPC_STREAM, STREAM_SIZE)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut threads = Vec::new();
+        // Made first, so a failure below stops the threads already started.
+        let mut dev = Self {
+            link: link.clone(),
+            rpc: Mutex::new(rpc),
+            stop: Arc::new(AtomicBool::new(false)),
+            restart: AtomicBool::new(false),
+            threads: Vec::new(),
+        };
+        let stop = dev.stop.clone();
+        let threads = &mut dev.threads;
 
         let wd = link.open_stream("__watchdog", 128)?;
         threads.push(spawn("watchdog", link.clone(), stop.clone(), move |link| {
             link.write(wd, &[0; 4])?;
             thread::sleep(WATCHDOG_PERIOD);
             Ok(())
-        }));
+        })?);
 
         let ts = link.open_stream("__timesync", 128)?;
         threads.push(spawn("timesync", link.clone(), stop.clone(), move |link| {
@@ -139,23 +155,17 @@ impl Device {
             b.extend_from_slice(&t.sec.to_le_bytes());
             b.extend_from_slice(&t.nsec.to_le_bytes());
             link.write(ts, &b)
-        }));
+        })?);
 
         link.open_stream("__log", 128)?;
-        threads.push(spawn("log", link.clone(), stop.clone(), move |link| {
+        threads.push(spawn("log", link, stop, move |link| {
             let packet = link.read("__log", None)?;
             if let Ok(msgs) = nop::from_slice::<Vec<LogMessage>>(&packet) {
                 msgs.into_iter().for_each(&on_log);
             }
             Ok(())
-        }));
+        })?);
 
-        let dev = Self {
-            link,
-            rpc: Mutex::new(rpc),
-            stop,
-            threads,
-        };
         dev.call("setLogLevel", vec![LOG_WARN.into()])?;
         Ok(dev)
     }
@@ -166,27 +176,47 @@ impl Device {
 
     /// Calls a method on the device and returns its result.
     pub fn call(&self, method: &str, args: Vec<Value>) -> Result<Value, Error> {
-        let stream = self.rpc.lock().unwrap();
+        let stream = self.rpc.locked();
         self.link.write(*stream, &encode_request(method, args))?;
-        let resp = self.link.read(RPC_STREAM, Some(Duration::from_secs(30)))?;
+        let resp = match self.link.read(RPC_STREAM, Some(Duration::from_secs(30))) {
+            Ok(r) => r,
+            Err(e) => {
+                // A late reply would be taken as the next call's.
+                self.link.close("RPC timed out");
+                return Err(e.into());
+            }
+        };
         decode_response(&resp)
     }
 
-    /// Ends the session. The camera restarts on its own once the watchdog stops.
+    /// Ends the session. The firmware is left running, as the camera's own firmware does not always start cleanly
+    /// after it; the next session takes the camera over from there.
     pub fn close(mut self) {
         self.shutdown();
+    }
+
+    /// Ends the session with an XLink reset instead, as the camera's own app does, for a restart that boots the
+    /// camera again at once: it comes back as its bootloader within seconds and is booted from there. Taking over
+    /// firmware left running pulls the camera off the bus, which while the system uses its USB video can bring it
+    /// back on a USB 2 connection.
+    pub fn restart_on_close(&self) {
+        self.restart.store(true, Ordering::Relaxed);
     }
 
     fn shutdown(&mut self) {
         if self.stop.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.link.ending();
-        // An XLink reset can leave the camera off the bus, so let its watchdog expire instead.
-        if self.link.wait_closed(Duration::from_secs(10)) {
-            for t in self.threads.drain(..) {
-                let _ = t.join();
-            }
+        if self.restart.load(Ordering::Relaxed) {
+            self.link.reset_device(Duration::from_secs(2));
+            // Wait for it to go, and close this side either way so the threads end and the USB interface is freed.
+            self.link.wait_closed(Duration::from_secs(10));
+        } else {
+            self.link.ending();
+        }
+        self.link.close("session ended");
+        for t in self.threads.drain(..) {
+            let _ = t.join();
         }
     }
 }
@@ -202,7 +232,7 @@ fn spawn(
     link: Arc<Link>,
     stop: Arc<AtomicBool>,
     mut step: impl FnMut(&Link) -> Result<(), opal_xlink::Error> + Send + 'static,
-) -> JoinHandle<()> {
+) -> Result<JoinHandle<()>, Error> {
     thread::Builder::new()
         .name(name.into())
         .spawn(move || {
@@ -212,7 +242,7 @@ fn spawn(
                 }
             }
         })
-        .expect("spawn thread")
+        .map_err(|e| Error::Link(e.into()))
 }
 
 #[cfg(test)]

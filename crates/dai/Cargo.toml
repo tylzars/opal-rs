@@ -6,8 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-opal-xlink = { version = "0.1.0", path = "../xlink" }
+opal-xlink = { path = "../xlink" }
 thiserror = "2.0.21"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Performance"] }

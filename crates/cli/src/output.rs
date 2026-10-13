@@ -9,10 +9,15 @@ use anyhow::Result;
 #[cfg(unix)]
 use crate::cameras::{self, Camera};
 
-/// Takes the processed frames and tells which apps watch them.
+/// Takes the processed frames and tells which apps watch them. Kept from one camera session to the next, so apps
+/// keep the camera when it restarts, at a new resolution too.
 pub struct Outputs {
+    /// The size of the session's frames, which cameras are opened at.
     width: usize,
     height: usize,
+    /// Frames resized for a camera that an app holds at another size.
+    #[cfg(unix)]
+    scaled: Vec<u8>,
     #[cfg(unix)]
     main: Camera,
     #[cfg(unix)]
@@ -29,7 +34,7 @@ pub struct Outputs {
     watch: opal_vcam::host::Frames,
 }
 
-/// Keeps the Windows camera registered while the session runs; held by the thread that made it.
+/// Keeps the Windows camera registered while the service runs; held by the thread that made it.
 pub struct Registration {
     #[cfg(windows)]
     _camera: opal_vcam::host::VirtualCamera,
@@ -40,23 +45,34 @@ pub struct Registration {
 struct Sink {
     camera: Camera,
     device: opal_v4l2::Output,
+    /// The size it was opened at. v4l2loopback keeps it while an app has the camera open.
+    size: (usize, usize),
     users: Vec<String>,
 }
 
 impl Outputs {
-    /// Sends a frame to the main camera, and to each extra one an app is using. The main camera always gets it, so
-    /// an app opening it starts with the live picture rather than black.
-    pub fn write(&mut self, frame: &[u8]) -> std::io::Result<()> {
+    /// Sends a `width` x `height` frame to the main camera, and to each extra one an app is using. The main camera
+    /// always gets it, so an app opening it starts with the live picture rather than black.
+    pub fn write(&mut self, frame: &[u8], width: usize, height: usize) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             let mut result = Ok(());
-            let main = self.main.nr;
-            for s in self
-                .sinks
+            let Self {
+                main, sinks, scaled, ..
+            } = self;
+            for s in sinks
                 .iter_mut()
-                .filter(|s| s.camera.nr == main || !s.users.is_empty())
+                .filter(|s| s.camera.nr == main.nr || !s.users.is_empty())
             {
-                if let Err(e) = s.device.write(frame) {
+                let data = if s.size == (width, height) {
+                    frame
+                } else {
+                    let (w, h) = s.size;
+                    scaled.resize(w * h * 3 / 2, 0);
+                    opal_vcam::shared::resize_nv12(frame, width, height, scaled, w, h);
+                    &scaled[..]
+                };
+                if let Err(e) = s.device.write(data) {
                     result = Err(e);
                 }
             }
@@ -64,9 +80,29 @@ impl Outputs {
         }
         #[cfg(windows)]
         {
-            self.frames.write(frame, self.width, self.height);
+            // The camera resizes frames to what each app asked for.
+            self.frames.write(frame, width, height);
             Ok(())
         }
+    }
+
+    /// Takes the size of a new session's frames. Cameras no app holds are reopened at it now, the others once
+    /// their apps let go.
+    pub fn set_size(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+        self.refresh();
+    }
+
+    /// Shows black while the camera restarts, rather than a frozen picture.
+    pub fn blank(&mut self) {
+        #[cfg(unix)]
+        for s in &mut self.sinks {
+            let _ = s.device.write(&black_frame(s.size.0, s.size.1));
+        }
+        #[cfg(windows)]
+        self.frames
+            .write(&black_frame(self.width, self.height), self.width, self.height);
     }
 
     /// The devices whose users `scan_users` should find.
@@ -122,7 +158,8 @@ impl Outputs {
     }
 
     /// Opens the cameras that are set up and present but not open yet, and closes ones that went away. A camera
-    /// that was removed but is still there (until the module reloads) keeps its video while an app uses it.
+    /// that was removed but is still there (until the module reloads) keeps its video while an app uses it. One
+    /// left at another size is reopened at the current one once no app uses it.
     pub fn refresh(&mut self) {
         #[cfg(unix)]
         {
@@ -130,18 +167,40 @@ impl Outputs {
                 return;
             }
             let wanted = self.wanted();
-            self.sinks
-                .retain(|s| s.camera.present() && (wanted.contains(&s.camera) || !s.users.is_empty()));
+            let size = (self.width, self.height);
+            // Closed first: v4l2loopback keeps the size while any writer has the camera open.
+            let mut resize = Vec::new();
+            self.sinks.retain(|s| {
+                let keep = s.camera.present() && (wanted.contains(&s.camera) || !s.users.is_empty());
+                if keep && s.size != size && s.users.is_empty() {
+                    resize.push(s.camera.clone());
+                    return false;
+                }
+                keep
+            });
+            for camera in resize {
+                // An app that opened it since the last look keeps the old size.
+                match open_device(&camera.path(), size.0, size.1) {
+                    Ok((device, size)) => self.sinks.push(Sink {
+                        camera,
+                        device,
+                        size,
+                        users: Vec::new(),
+                    }),
+                    Err(e) => eprintln!("{}: {e:#}", camera.name),
+                }
+            }
             for camera in wanted {
                 if self.sinks.iter().any(|s| s.camera == camera) || !camera.present() {
                     continue;
                 }
-                match open_device(&camera.path(), self.width, self.height) {
-                    Ok(device) => {
+                match open_device(&camera.path(), size.0, size.1) {
+                    Ok((device, size)) => {
                         self.failed.retain(|n| *n != camera.nr);
                         self.sinks.push(Sink {
                             camera,
                             device,
+                            size,
                             users: Vec::new(),
                         })
                     }
@@ -224,13 +283,15 @@ pub fn open(path: Option<PathBuf>, width: usize, height: usize) -> Result<Option
         let Some(path) = path else { return Ok(None) };
         let path = path.canonicalize().with_context(|| path.display().to_string())?;
         let main = camera_at(&path).with_context(|| format!("{} is not a video device", path.display()))?;
-        let device = open_device(&path, width, height)?;
+        let (device, size) = open_device(&path, width, height)?;
         let mut outputs = Outputs {
             width,
             height,
+            scaled: Vec::new(),
             sinks: vec![Sink {
                 camera: main.clone(),
                 device,
+                size,
                 users: Vec::new(),
             }],
             main,
@@ -269,13 +330,15 @@ fn camera_at(path: &std::path::Path) -> Option<Camera> {
     })
 }
 
-/// Opens a v4l2loopback device and writes black, which makes it show up in apps.
+/// Opens a v4l2loopback device and writes black, which makes it show up in apps. An app holding it at another
+/// size keeps that size; returns the size in use.
 #[cfg(unix)]
-fn open_device(path: &std::path::Path, width: usize, height: usize) -> Result<opal_v4l2::Output> {
-    let mut device = opal_v4l2::Output::open(path, width as u32, height as u32, opal_v4l2::NV12)
+fn open_device(path: &std::path::Path, width: usize, height: usize) -> Result<(opal_v4l2::Output, (usize, usize))> {
+    let (mut device, (w, h)) = opal_v4l2::Output::open(path, width as u32, height as u32, opal_v4l2::NV12)
         .with_context(|| path.display().to_string())?;
-    device.write(&black_frame(width, height))?;
-    Ok(device)
+    let size = (w as usize, h as usize);
+    device.write(&black_frame(size.0, size.1))?;
+    Ok((device, size))
 }
 
 /// Black NV12 frame, written first so apps can open the output before video arrives.
@@ -286,8 +349,10 @@ pub fn black_frame(width: usize, height: usize) -> Vec<u8> {
     f
 }
 
-/// In low power mode apps use the camera's own USB video. Returns how many apps use it and their names. Windows
-/// cannot tell, so there the camera counts as in use while the service runs.
+/// In low power mode apps use the camera's own USB video. Returns how many apps use it and their names, so the
+/// camera runs only while one does, as the camera's own app has it: an app closing the video stops the camera, and
+/// the next one to open it needs it started again. Windows says which apps use a camera, not which one; with the
+/// virtual camera gone in low power mode that is this one.
 pub fn low_power_users(node: &mut Option<PathBuf>) -> (usize, Vec<String>) {
     #[cfg(unix)]
     {
@@ -302,7 +367,8 @@ pub fn low_power_users(node: &mut Option<PathBuf>) -> (usize, Vec<String>) {
     #[cfg(windows)]
     {
         let _ = node;
-        (1, crate::platform::camera_apps())
+        let names = crate::platform::camera_apps();
+        (names.len(), names)
     }
 }
 

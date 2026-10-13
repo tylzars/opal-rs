@@ -18,7 +18,8 @@ const GET_BOOTLOADER_TYPE: u32 = 8;
 const RESP_BOOTLOADER_VERSION: u32 = 2;
 const RESP_BOOTLOADER_TYPE: u32 = 3;
 
-/// Asks an application started from flash to reboot into the bootloader.
+/// Asks an application running on the camera (its own, from flash, or one left running) to reboot into the
+/// bootloader. The camera drops off the bus at once, so a restart ends the session with an XLink reset instead.
 pub fn reboot_to_bootloader(info: &nusb::DeviceInfo) -> Result<(), Error> {
     let device = info.open().wait().map_err(std::io::Error::from)?;
     let req = ControlOut {
@@ -34,7 +35,8 @@ pub fn reboot_to_bootloader(info: &nusb::DeviceInfo) -> Result<(), Error> {
     let _ = device.control_out(req, Duration::from_secs(1)).wait();
     // WinUSB only sends control requests through a claimed interface.
     #[cfg(windows)]
-    if let Ok(iface) = device.claim_interface(0).wait() {
+    {
+        let iface = device.claim_interface(0).wait().map_err(std::io::Error::from)?;
         let _ = iface.control_out(req, Duration::from_secs(1)).wait();
     }
     Ok(())
@@ -92,6 +94,8 @@ impl Bootloader {
         req.extend_from_slice(&(image.len() as u32).to_le_bytes());
         req.extend_from_slice(&packets.to_le_bytes());
         self.link.write(self.stream, &req)?;
+        // The bootloader drops off the bus once it starts the image, so the link going down is expected.
+        self.link.ending();
         self.link.write_split(self.stream, image, STREAM_SIZE as usize)?;
         self.link.wait_closed(Duration::from_secs(10));
         Ok(())
@@ -100,9 +104,8 @@ impl Bootloader {
 
 /// Waits for a device in `state` to appear, preferring one with the given serial.
 pub fn wait_for(serial: &str, state: crate::State, timeout: Duration) -> Option<crate::Found> {
-    let step = Duration::from_millis(100);
-    let mut waited = Duration::ZERO;
-    while waited < timeout {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
         if let Ok(list) = crate::list() {
             let mut matching: Vec<_> = list.into_iter().filter(|f| f.state == state).collect();
             if let Some(i) = matching.iter().position(|f| f.serial() == Some(serial)) {
@@ -112,8 +115,7 @@ pub fn wait_for(serial: &str, state: crate::State, timeout: Duration) -> Option<
                 return matching.pop();
             }
         }
-        thread::sleep(step);
-        waited += step;
+        thread::sleep(Duration::from_millis(100));
     }
     None
 }

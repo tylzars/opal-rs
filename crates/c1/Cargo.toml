@@ -6,4 +6,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-opal-dai = { version = "0.1.0", path = "../dai" }
+opal-dai = { path = "../dai" }

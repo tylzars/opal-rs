@@ -235,9 +235,8 @@ pub fn uninstall(keep_data: bool, yes: bool, dry_run: bool) -> Result<bool> {
         println!("  - {}", s.describe());
     }
     if keep_data {
-        println!("Your settings and camera files are kept.");
+        println!("Settings and camera files are kept.");
     }
-    println!("The camera needs nothing: unplugging it returns it to its own firmware.");
     if dry_run {
         return Ok(true);
     }
@@ -254,7 +253,7 @@ pub fn uninstall(keep_data: bool, yes: bool, dry_run: bool) -> Result<bool> {
     let ok = carry_out(&steps);
     #[cfg(unix)]
     println!(
-        "Done. v4l2loopback stays loaded until you restart; `sudo apt autoremove` removes v4l2loopback-dkms if \
+        "Done. v4l2loopback stays loaded until a restart; `sudo apt autoremove` removes v4l2loopback-dkms if \
          nothing else uses it."
     );
     #[cfg(windows)]

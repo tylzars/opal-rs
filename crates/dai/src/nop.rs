@@ -42,10 +42,6 @@ impl<'a> Reader<'a> {
         Self { data }
     }
 
-    pub fn remaining(&self) -> &'a [u8] {
-        self.data
-    }
-
     fn byte(&mut self) -> Result<u8, Error> {
         let (&b, rest) = self.data.split_first().ok_or(Error::Eof)?;
         self.data = rest;

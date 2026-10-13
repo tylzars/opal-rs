@@ -1,5 +1,6 @@
 //! Main control panel: live preview with the settings grouped in tabs.
 
+use crate::LockExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -196,7 +197,7 @@ impl State {
             {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
                 if !path.is_empty() {
-                    *slot.lock().unwrap() = Some((pick, path));
+                    *slot.locked() = Some((pick, path));
                     ctx.request_repaint();
                 }
             }
@@ -258,7 +259,7 @@ fn signed(v: i32) -> String {
 pub fn show(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     {
-        let l = app.lists.lock().unwrap();
+        let l = app.lists.locked();
         if l.serial != app.view.lists_seen {
             app.view.lists_seen = l.serial;
             app.view.presets = l.presets.split_whitespace().map(str::to_owned).collect();
@@ -268,7 +269,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     keep_preview(app, &ctx);
     app.update_texture(&ctx);
     let mut cmds = Vec::new();
-    if let Some((pick, path)) = app.view.picked.lock().unwrap().take() {
+    if let Some((pick, path)) = app.view.picked.locked().take() {
         match pick {
             Pick::Background => {
                 app.view.picking_background = false;
@@ -331,6 +332,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.add_space(10.0);
                 stage(app, ui, size);
                 message(app, ui);
+                camera_hint(app, ui);
             });
     } else {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -345,6 +347,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.add_space(10.0);
                 stage(app, ui, size);
                 message(app, ui);
+                camera_hint(app, ui);
             });
             ui.add_space(12.0);
             egui::ScrollArea::vertical()
@@ -352,7 +355,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     column(ui, left, w, |ui| {
-                        settings(app, ui, &mut cmds);
+                        // Only a running camera session takes settings; the stage above says why there is none.
+                        let live = app.connected;
+                        ui.add_enabled_ui(live, |ui| settings(app, ui, &mut cmds));
                         ui.add_space(16.0);
                     });
                 });
@@ -375,7 +380,7 @@ pub(crate) fn run(app: &mut App, cmds: Vec<String>) {
         app.apply(cmd);
     }
     if presets {
-        app.lists.lock().unwrap().stale = true;
+        app.lists.locked().stale = true;
     }
     if loaded {
         // A preset changes many settings at once; show what the service has now.
@@ -442,6 +447,8 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     painter.rect_filled(rect, radius, Color32::from_rgb(0x08, 0x09, 0x0b));
 
     let connected = app.status.starts_with("mode ");
+    // The service runs, but no camera session yet: what it waits for.
+    let waiting = app.status.strip_prefix("waiting ").map(|c| c.trim().to_owned());
     let video_off = app.status_value("video") == Some("off");
     let running = app.preview.running();
     let showing = running && app.texture.is_some();
@@ -482,7 +489,7 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
         ui.painter()
             .rect_filled(rect, radius, Color32::from_black_alpha(if showing { 200 } else { 0 }));
         centre(ui, 110.0, &mut |ui| {
-            ui.label(egui::RichText::new("Your video is off").size(20.0).strong().color(TEXT));
+            ui.label(egui::RichText::new("Video is off").size(20.0).strong().color(TEXT));
             ui.label(egui::RichText::new("Make a peace sign to turn it back on, or").color(WEAK));
             ui.add_space(6.0);
             if theme::primary(ui, "Turn video back on").clicked() {
@@ -508,16 +515,11 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
             }
         });
     } else if !showing {
-        let (title, detail) = if !connected {
-            (
-                "The camera service is not running",
-                if cfg!(windows) {
-                    "It starts with the tray icon at sign-in; run opal-rs-tray in the opal-rs folder to start it now."
-                        .to_owned()
-                } else {
-                    "Start it with: systemctl --user start opal-rs".to_owned()
-                },
-            )
+        let (title, detail) = if let Some(code) = &waiting {
+            let (title, detail) = opal_ipc::waiting_text(code);
+            (title, detail.to_owned())
+        } else if !connected {
+            ("The camera service is not running", "It starts at sign-in.".to_owned())
         } else if !app.want_preview {
             ("Preview paused", String::new())
         } else if app.preview.error().is_some() {
@@ -529,15 +531,27 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
             ("Starting preview", String::new())
         };
         let error = app.preview.error();
-        centre(ui, 70.0, &mut |ui| {
-            let r = ui.label(egui::RichText::new(title).size(17.0).color(TEXT));
-            if let Some(e) = &error {
-                r.on_hover_text(e);
-            }
-            if !detail.is_empty() {
-                ui.label(egui::RichText::new(&detail).color(WEAK));
-            }
-        });
+        centre(
+            ui,
+            if connected || waiting.is_some() { 80.0 } else { 120.0 },
+            &mut |ui| {
+                let r = ui.label(egui::RichText::new(title).size(17.0).color(TEXT));
+                if let Some(e) = &error {
+                    r.on_hover_text(e);
+                }
+                if !detail.is_empty() {
+                    ui.label(egui::RichText::new(&detail).color(WEAK));
+                }
+                if !connected && waiting.is_none() && theme::primary(ui, "Start it").clicked() {
+                    // In the background: starting can take a few seconds, and the status shows when it is up.
+                    std::thread::spawn(|| {
+                        if let Err(e) = opal_ipc::start_service() {
+                            eprintln!("starting the service: {e}");
+                        }
+                    });
+                }
+            },
+        );
     }
 
     // In low power mode the preview holds the camera: offer to give it back to apps.
@@ -549,7 +563,9 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     }
 
     // Status pills.
-    let (text, dot) = if !connected {
+    let (text, dot) = if let Some(code) = &waiting {
+        (if code == "starting" { "Starting" } else { "Waiting" }, AMBER)
+    } else if !connected {
         ("Not connected", RED)
     } else if video_off {
         ("Video off", AMBER)
@@ -590,6 +606,15 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
         };
         theme::pill(ui, right, Align2::RIGHT_TOP, None, &res);
     }
+}
+
+/// Which camera to pick in apps. They also list the camera's own "Opal C1", which has video only in low power mode.
+fn camera_hint(app: &App, ui: &mut Ui) {
+    if app.c.low_power || !app.connected {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("In applications, choose \"Opal C1 Virtual\".").color(WEAK));
 }
 
 fn message(app: &mut App, ui: &mut Ui) {
@@ -664,7 +689,7 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                     });
                 }
             });
-            if theme::switch_row(ui, "Follow my face", "", &mut c.zoom) {
+            if theme::switch_row(ui, "Face tracking", "", &mut c.zoom) {
                 cmds.push(c.zoom_cmd());
             }
             if c.zoom {
@@ -830,9 +855,9 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     #[cfg(unix)]
     {
         group(ui, "Virtual cameras");
-        let reply = app.lists.lock().unwrap().cameras.clone();
+        let reply = app.lists.locked().cameras.clone();
         if app.view.cameras.show(ui, &reply) {
-            app.lists.lock().unwrap().stale = true;
+            app.lists.locked().stale = true;
         }
     }
 
@@ -867,7 +892,7 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
             if c.gestures {
                 for (name, label, on) in [
                     ("peace", "Peace sign turns the video off and on", &mut c.peace),
-                    ("pinch", "Pinch turns Follow my face on and off", &mut c.pinch),
+                    ("pinch", "Pinch turns face tracking on and off", &mut c.pinch),
                 ] {
                     if theme::switch_row(ui, label, "", on) {
                         cmds.push(format!("gesture {name} {}", if *on { "on" } else { "off" }));
@@ -877,11 +902,7 @@ fn settings(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
                     let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                     ui.painter()
                         .circle_filled(r.center(), 4.0, if hand { GREEN } else { RAISED });
-                    let text = if hand {
-                        "Your hand is in view"
-                    } else {
-                        "No hand in view"
-                    };
+                    let text = if hand { "Hand in view" } else { "No hand in view" };
                     ui.label(egui::RichText::new(text).small().color(WEAK));
                 });
             }
@@ -1081,7 +1102,7 @@ fn look_row(ui: &mut Ui, c: &mut Controls, v: &mut State, cmds: &mut Vec<String>
         let (label, selected) = if i == 0 {
             ("None".to_owned(), !v.custom_look && !c.look_on)
         } else if i == count - 1 {
-            ("Your own".to_owned(), v.custom_look)
+            ("Custom".to_owned(), v.custom_look)
         } else {
             let name = names[i - 1];
             (title_case(name), !v.custom_look && c.look_on && c.look == name)
@@ -1149,16 +1170,8 @@ fn look_row(ui: &mut Ui, c: &mut Controls, v: &mut State, cmds: &mut Vec<String>
 fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
     let info = |k| app.status_value(k).map(str::to_owned);
     let (usb, serial, firmware) = (info("usb"), info("serial"), info("firmware"));
-    let no_virtual = app.status_value("virtualcam") == Some("no");
     let (c, mode) = (&mut app.c, &mut app.mode);
     card(ui, "", |ui| {
-        if matches!(usb.as_deref(), Some("low" | "full" | "high")) {
-            ui.label(
-                egui::RichText::new("The camera is on a slow USB port, so video is limited to 720p. Use a USB 3 port.")
-                    .color(AMBER),
-            );
-            ui.add_space(4.0);
-        }
         ui.add_enabled_ui(!c.low_power, |ui| {
             ui.label(egui::RichText::new("Resolution").color(TEXT));
             let options = RESOLUTIONS.map(|(n, _, _)| (n.to_owned(), n));
@@ -1178,7 +1191,7 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
         if theme::segmented(ui, "antibanding", &mut c.antibanding, &options) {
             cmds.push(format!("antibanding {}", c.antibanding));
         }
-        hint(ui, "Removes flicker from mains lighting. Auto goes by your time zone.");
+        hint(ui, "Removes flicker from mains lighting. Auto uses the time zone.");
         ui.add_space(4.0);
         ui.label(egui::RichText::new("Camera on").color(TEXT));
         let modes = [(Mode::Auto, "When needed"), (Mode::On, "Always"), (Mode::Off, "Never")];
@@ -1198,18 +1211,16 @@ fn device(app: &mut App, ui: &mut Ui, cmds: &mut Vec<String>) {
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(4.0);
-        if no_virtual {
-            hint(
+        // Low power mode is Linux only: on Windows neither the firmware loaded here nor the camera's own serves its
+        // USB video reliably.
+        if cfg!(unix)
+            && theme::switch_row(
                 ui,
-                "Low power mode is always on here: this Windows has no virtual camera (Windows 11 is needed), so apps \
-                 get the camera's own picture, without effects.",
-            );
-        } else if theme::switch_row(
-            ui,
-            "Low power mode",
-            "Changing this restarts the camera.",
-            &mut c.low_power,
-        ) {
+                "Low power mode",
+                "Changing this restarts the camera.",
+                &mut c.low_power,
+            )
+        {
             cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
         }
         if let (Some(serial), Some(firmware), Some(usb)) = (&serial, &firmware, &usb) {
@@ -1427,11 +1438,11 @@ fn stickers(v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>, enabled: bool, c
                         ));
                     }
                     let (mut behind, mut follow) = (row.flags.contains('b'), row.flags.contains('f'));
-                    let a = theme::switch_row(ui, "Behind me", "", &mut behind);
+                    let a = theme::switch_row(ui, "Behind person", "", &mut behind);
                     let b = theme::switch_row(
                         ui,
-                        "Follow my face",
-                        "Across and down are then around your face.",
+                        "Follow face",
+                        "Across and down are then relative to the face.",
                         &mut follow,
                     );
                     if a || b {
@@ -1529,14 +1540,11 @@ fn presets(v: &mut State, ui: &mut Ui, cmds: &mut Vec<String>, enabled: bool) {
     ui.add_enabled_ui(enabled, |ui| {
         card(ui, "", |ui| {
             if v.presets.is_empty() {
-                hint(
-                    ui,
-                    "Save your look, effects and lighting here to switch back to them later.",
-                );
+                hint(ui, "Saves the look, effects and lighting under a name.");
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for name in &v.presets {
-                        let resp = ui.button(name.as_str());
+                        let resp = ui.button(name.replace('_', " "));
                         if resp.clicked() {
                             cmds.push(format!("preset load {name}"));
                         }
@@ -1639,31 +1647,31 @@ fn lighting_cards(c: &mut Controls, v: &mut State, ui: &mut Ui, cmds: &mut Vec<S
 const HELP: [(&str, &str); 22] = [
     (
         "Zoom",
-        "Zooms into the middle of the picture. Follow my face takes over while it is on.",
+        "Zooms into the middle of the picture. Face tracking takes over while it is on.",
     ),
     (
-        "Follow my face",
-        "Keeps you in the middle of the picture as you move around. How close sets how tightly you are framed, \
-         and how quickly it follows sets how fast the picture catches up with you.",
+        "Face tracking",
+        "Keeps the face in the middle of the picture. How close sets how tight the framing is; how quickly it \
+         follows sets how fast the picture catches up.",
     ),
     (
         "Presets",
-        "Saves your look, lighting, colours, blur or background picture and framing under a name. Click a preset to \
+        "Saves the look, lighting, colours, blur or background picture and framing under a name. Click a preset to \
          switch to it, or right-click it to delete it.",
     ),
     (
         "Blur background",
-        "Softens everything behind you so only you stay sharp. Strength sets how soft it gets.",
+        "Softens the background and keeps the person sharp. Strength sets how soft it gets.",
     ),
     (
         "Loop",
-        "Hold the button to record up to ten seconds, then let go: the recording plays in a loop instead of your \
-         live video until you go back to live. Bounce plays it forwards then backwards.",
+        "Hold the button to record up to ten seconds, then let go: the recording plays in a loop instead of live \
+         video until Back to live video is clicked. Bounce plays it forwards then backwards.",
     ),
     (
         "Stickers",
-        "Words, a name card, a clock, a timer or a picture on top of your video. Click one to move it, size it, put \
-         it behind you or have it follow your face.",
+        "Words, a name card, a clock, a timer or a picture on top of the video. Click one to move it, size it, put \
+         it behind the person or have it follow the face.",
     ),
     (
         "Touch up and skin tone",
@@ -1676,12 +1684,12 @@ const HELP: [(&str, &str); 22] = [
     ),
     (
         "Background picture",
-        "Shows a picture of your choice behind you instead of the room. Use a JPEG or PNG file.",
+        "Replaces the room behind the person with a picture (JPEG or PNG).",
     ),
     (
         "Look",
-        "Gives your video a different colour style. Strength blends between your normal picture and the look. \
-         Your own uses a look file (.cube) from a photo or video editing app.",
+        "A colour style for the video. Strength blends between the normal picture and the look. Custom uses a \
+         look file (.cube) from a photo or video editing app.",
     ),
     (
         "Focus, exposure and colour",
@@ -1696,7 +1704,7 @@ const HELP: [(&str, &str); 22] = [
         "Lighting",
         "Temperature makes the picture warmer or cooler, tint more magenta or green. Shadows and highlights brighten \
          or darken the dark and light parts, and vibrance makes dull colours stronger while leaving skin alone. \
-         Pick white, then click something white or grey in the preview, sets temperature and tint for you.",
+         Pick white, then click something white or grey in the preview, sets temperature and tint to match.",
     ),
     (
         "Colours",
@@ -1705,31 +1713,30 @@ const HELP: [(&str, &str); 22] = [
     ),
     (
         "Microphone",
-        "Turns the camera's microphone off or on. Boost makes your voice louder if people find you hard to hear.",
+        "Turns the camera's microphone off or on. Boost makes speech louder.",
     ),
     (
         "Hand gestures",
-        "Hold up a peace sign to turn your video off, and again to turn it back on. Pinch to turn Follow my face \
-         on or off.",
+        "A peace sign turns the video off, and again turns it back on. A pinch turns face tracking on or off.",
     ),
     (
         "Resolution",
-        "How sharp the picture is. Higher is sharper but asks more of your computer. Changing it restarts the camera.",
+        "How sharp the picture is. Higher is sharper but uses more processing. Changing it restarts the camera.",
     ),
     (
         "Light flicker",
-        "Removes the flicker or rolling bands that mains-powered lights can cause. Auto picks 50 or 60 Hz from your \
-         time zone; pick one yourself if the bands stay.",
+        "Removes the flicker or rolling bands that mains-powered lights can cause. Auto picks 50 or 60 Hz from the \
+         time zone; choose one by hand if the bands stay.",
     ),
     (
         "Camera on",
-        "When needed starts the camera only while an app is using it. Always keeps it running so apps start faster. \
-         Never keeps it off. Off while the screen is locked stops it whenever you lock your screen.",
+        "When needed runs the camera only while an app uses it. Always keeps it running so apps start faster. \
+         Never keeps it off.",
     ),
     (
         "Low power mode",
-        "Apps get the picture straight from the camera at 1080p. This uses less power, but the effects, Follow my \
-         face and hand gestures are off. Changing it restarts the camera.",
+        "Applications get the picture straight from the camera at 1080p; choose \"Opal C1\" in them. This uses \
+         less processing, but effects, face tracking and hand gestures are off. Changing it restarts the camera.",
     ),
     (
         "Zebra stripes and histogram",

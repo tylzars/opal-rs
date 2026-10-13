@@ -47,10 +47,13 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
     let c = &mut app.c;
 
     ui.heading("Camera");
-    if ui.checkbox(&mut c.low_power, "Low power mode").changed() {
-        cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
+    // Low power mode is Linux only.
+    if cfg!(unix) {
+        if ui.checkbox(&mut c.low_power, "Low power mode").changed() {
+            cmds.push(format!("power {}", if c.low_power { "low" } else { "normal" }));
+        }
+        ui.weak("Apps use the camera directly at 1080p, without effects. Restarts the camera.");
     }
-    ui.weak("Apps use the camera directly at 1080p, without effects. Restarts the camera.");
     ui.add_enabled_ui(!c.low_power, |ui| {
         ui.horizontal(|ui| {
             ui.label("Resolution");
@@ -303,7 +306,7 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                 "magnify off".into()
             });
         }
-        if ui.checkbox(&mut c.zoom, "Follow my face").changed() {
+        if ui.checkbox(&mut c.zoom, "Face tracking").changed() {
             cmds.push(c.zoom_cmd());
         }
         if ui
@@ -329,7 +332,7 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         ui.add_enabled_ui(c.gestures, |ui| {
             for (name, label, on) in [
                 ("peace", "Peace sign: video off and on", &mut c.peace),
-                ("pinch", "Pinch: follow my face on and off", &mut c.pinch),
+                ("pinch", "Pinch: face tracking on and off", &mut c.pinch),
             ] {
                 if ui.checkbox(on, label).changed() {
                     cmds.push(format!("gesture {name} {}", if *on { "on" } else { "off" }));

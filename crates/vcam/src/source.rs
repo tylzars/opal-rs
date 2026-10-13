@@ -1,6 +1,6 @@
 //! The media source Frame Server loads: one live NV12 stream read from the shared buffer.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
@@ -93,7 +93,6 @@ impl Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        self.view.set_streaming(false);
         unsafe {
             let _ = UnmapViewOfFile(self.address);
             let _ = CloseHandle(self.handle);
@@ -185,14 +184,13 @@ impl IMFMediaSource_Impl for Source_Impl {
 
     fn Start(
         &self,
-        descriptor: Ref<IMFPresentationDescriptor>,
+        // The app's choice of size lives in the stream descriptor's handler, shared with ours.
+        _descriptor: Ref<IMFPresentationDescriptor>,
         _format: *const GUID,
         start: *const PROPVARIANT,
     ) -> Result<()> {
         self.check()?;
-        // The app's choice of size lives in the stream descriptor's handler, shared with ours.
-        let _ = descriptor;
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let new = st.stream.is_none();
         if new {
             let ex: IMFMediaSourceEx = self.to_interface();
@@ -216,20 +214,14 @@ impl IMFMediaSource_Impl for Source_Impl {
             self.queue
                 .QueueEventParamVar(MESourceStarted.0 as u32, &GUID::zeroed(), HRESULT(0), start)?
         };
-        if let Some(sh) = &self.shared {
-            sh.view.set_streaming(true);
-        }
         Ok(())
     }
 
     fn Stop(&self) -> Result<()> {
         self.check()?;
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(s) = &st.stream {
             s.set_state(MF_STREAM_STATE_STOPPED)?;
-        }
-        if let Some(sh) = &self.shared {
-            sh.view.set_streaming(false);
         }
         unsafe {
             self.queue
@@ -242,13 +234,10 @@ impl IMFMediaSource_Impl for Source_Impl {
     }
 
     fn Shutdown(&self) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.shutdown = true;
         if let Some(s) = st.stream.take() {
             s.shutdown();
-        }
-        if let Some(sh) = &self.shared {
-            sh.view.set_streaming(false);
         }
         unsafe { self.queue.Shutdown() }
     }
@@ -256,7 +245,7 @@ impl IMFMediaSource_Impl for Source_Impl {
 
 impl Source_Impl {
     fn check(&self) -> Result<()> {
-        if self.state.lock().unwrap().shutdown {
+        if self.state.lock().unwrap_or_else(PoisonError::into_inner).shutdown {
             Err(MF_E_SHUTDOWN.into())
         } else {
             Ok(())
@@ -316,6 +305,8 @@ struct StreamState {
     /// Latest frame from the service, and the same frame at the size the app picked.
     frame: Vec<u8>,
     frame_size: (usize, usize),
+    /// Where a new frame is read to, kept only if it was read whole.
+    incoming: Vec<u8>,
     out: Vec<u8>,
     last_seq: u64,
     /// When the next sample is due.
@@ -334,6 +325,7 @@ impl Stream {
                 state: MF_STREAM_STATE_STOPPED,
                 frame: Vec::new(),
                 frame_size: (0, 0),
+                incoming: Vec::new(),
                 out: Vec::new(),
                 last_seq: 0,
                 due: Instant::now(),
@@ -344,7 +336,7 @@ impl Stream {
 
     /// Moves to `value`, telling the pipeline.
     fn set_state(&self, value: MF_STREAM_STATE) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if st.shutdown {
             return Err(MF_E_SHUTDOWN.into());
         }
@@ -369,7 +361,7 @@ impl Stream {
     /// Stops for good, when the source shuts down.
     fn shutdown(&self) {
         let _ = self.set_state(MF_STREAM_STATE_STOPPED);
-        self.state.lock().unwrap().shutdown = true;
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).shutdown = true;
         let _ = unsafe { self.queue.Shutdown() };
     }
 }
@@ -399,33 +391,58 @@ impl IMFMediaStream_Impl for Stream_Impl {
     }
 
     fn RequestSample(&self, token: Ref<IUnknown>) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
-        if st.shutdown {
-            return Err(MF_E_SHUTDOWN.into());
-        }
-        if st.state != MF_STREAM_STATE_RUNNING {
-            return Err(MF_E_INVALIDREQUEST.into());
-        }
-        // One frame per frame time; a new frame from the service is taken as soon as it is there.
-        let wait_until = st.due;
-        if let Some(sh) = &self.shared {
-            while Instant::now() < wait_until && sh.view.latest_seq() == st.last_seq {
-                std::thread::sleep(Duration::from_millis(2));
+        // A panic here would abort Windows' camera service, and every camera with it.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.request_sample(token)))
+            .unwrap_or_else(|_| Err(E_FAIL.into()))
+    }
+}
+
+impl Stream {
+    fn request_sample(&self, token: Ref<IUnknown>) -> Result<()> {
+        let check = |st: &StreamState| -> Result<()> {
+            if st.shutdown {
+                Err(MF_E_SHUTDOWN.into())
+            } else if st.state != MF_STREAM_STATE_RUNNING {
+                Err(MF_E_INVALIDREQUEST.into())
+            } else {
+                Ok(())
             }
+        };
+        let (wait_until, seen) = {
+            let st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            check(&st)?;
+            (st.due, st.last_seq)
+        };
+        // One frame per frame time; a new frame from the service is taken as soon as it is there. Waited out
+        // without the lock, so stopping the stream is not held up.
+        match &self.shared {
+            Some(sh) => {
+                // Until a finished new frame is there; an odd count is a frame still being written, or one whose
+                // writer died, and must not end the wait every time.
+                while Instant::now() < wait_until && {
+                    let now = sh.view.latest_seq();
+                    now == seen || now % 2 == 1
+                } {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            None => std::thread::sleep(wait_until.saturating_duration_since(Instant::now())),
+        }
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        check(&st)?;
+        if let Some(sh) = &self.shared {
+            sh.view.pull();
             let StreamState {
                 frame,
                 frame_size,
+                incoming,
                 last_seq,
                 ..
             } = &mut *st;
-            if let Some((w, h, seq)) = sh.view.read(frame) {
+            if let Some((w, h, seq)) = sh.view.read(incoming) {
+                std::mem::swap(frame, incoming);
                 *frame_size = (w, h);
                 *last_seq = seq;
-            }
-        } else {
-            let now = Instant::now();
-            if now < wait_until {
-                std::thread::sleep(wait_until - now);
             }
         }
         st.due = Instant::now() + FRAME_TIME;
@@ -433,8 +450,13 @@ impl IMFMediaStream_Impl for Stream_Impl {
         let (w, h) = unsafe {
             let t = self.descriptor.GetMediaTypeHandler()?.GetCurrentMediaType()?;
             let size = t.GetUINT64(&MF_MT_FRAME_SIZE)?;
-            ((size >> 32) as usize, (size & 0xffff_ffff) as usize)
+            ((size >> 32) as u32, size as u32)
         };
+        // Only the sizes offered; anything else would size the buffers wrongly.
+        if !SIZES.contains(&(w, h)) {
+            return Err(MF_E_INVALIDMEDIATYPE.into());
+        }
+        let (w, h) = (w as usize, h as usize);
         let len = w * h * 3 / 2;
         let StreamState {
             frame, frame_size, out, ..
@@ -474,7 +496,7 @@ impl IMFMediaStream2_Impl for Stream_Impl {
     }
 
     fn GetStreamState(&self) -> Result<MF_STREAM_STATE> {
-        Ok(self.state.lock().unwrap().state)
+        Ok(self.state.lock().unwrap_or_else(PoisonError::into_inner).state)
     }
 }
 

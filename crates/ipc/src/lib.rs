@@ -52,6 +52,28 @@ pub fn location() -> PathBuf {
     dir.unwrap_or_else(std::env::temp_dir).join("opal-rs.sock")
 }
 
+/// What the service is waiting for between camera sessions, as `status` reports it (`waiting <code>`): a title and
+/// a line of help, for the control panel and the tray.
+pub fn waiting_text(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "camera" => ("Camera not found", "Plug in the Opal C1."),
+        "usb2" => (
+            "The camera is connected over USB 2",
+            "Unplug it and plug it back in. If this keeps happening, use a USB 3 port.",
+        ),
+        "replug" => ("The camera stopped responding", "Unplug it and plug it back in."),
+        "windows10" => (
+            "Windows 11 is needed",
+            "Opal C1 still works as a plain webcam: in applications, choose \"Opal C1\".",
+        ),
+        "output" => (
+            "Opal C1 Virtual is not set up yet",
+            "Restart the computer to finish setting it up.",
+        ),
+        _ => ("Starting the camera", ""),
+    }
+}
+
 /// The service's end.
 pub struct Listener {
     #[cfg(unix)]
@@ -211,9 +233,16 @@ pub fn program(name: &str) -> PathBuf {
 /// Starts the service if it is not running: through systemd on Linux; on Windows without a window, logging to
 /// `%LOCALAPPDATA%\opal-rs\service.log`.
 pub fn start_service() -> io::Result<()> {
+    start_service_with(&program("opal-rs"))
+}
+
+/// [`start_service`], with the service program given (on Windows; Linux always starts it through systemd).
+pub fn start_service_with(exe: &std::path::Path) -> io::Result<()> {
     if request("status", Duration::from_secs(2)).is_ok() {
         return Ok(());
     }
+    #[cfg(unix)]
+    let _ = exe;
     #[cfg(unix)]
     {
         let status = std::process::Command::new("systemctl")
@@ -231,8 +260,10 @@ pub fn start_service() -> io::Result<()> {
             .map_or_else(std::env::temp_dir, PathBuf::from)
             .join("opal-rs");
         std::fs::create_dir_all(&dir)?;
+        // The last run's log is kept, for when something went wrong in it.
+        let _ = std::fs::rename(dir.join("service.log"), dir.join("service.old.log"));
         let log = std::fs::File::create(dir.join("service.log"))?;
-        let mut c = std::process::Command::new(program("opal-rs"));
+        let mut c = std::process::Command::new(exe);
         c.arg("run")
             .creation_flags(NO_WINDOW)
             .stdout(log.try_clone()?)
