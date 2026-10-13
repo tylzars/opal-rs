@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage};
 
 use crate::{MODES, Tray, dot, open_panel, send, toggle_autostart};
@@ -18,6 +20,15 @@ fn icon(colour: [u8; 3]) -> Icon {
 }
 
 pub fn run() {
+    if std::env::args().any(|a| a == opal_ipc::autostart::SIGN_IN) && !opal_ipc::autostart::enabled() {
+        return;
+    }
+    // One icon per sign-in: the Run entry starts a second copy after the sign-in task has started one.
+    let name: Vec<u16> = "Local\\opal-rs-tray".encode_utf16().chain([0]).collect();
+    let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return;
+    }
     if let Err(e) = opal_ipc::start_service() {
         eprintln!("opal-rs: {e}");
     }

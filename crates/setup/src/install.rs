@@ -31,6 +31,8 @@ const BUSY_WAIT: Duration = Duration::from_secs(5);
 const SHARING_VIOLATION: i32 = 32;
 /// What is installed, in this order.
 const FILES: [&str; 4] = ["opal-rs.exe", "opal-rs-gui.exe", "opal-rs-tray.exe", "opal_vcam.dll"];
+/// The scheduled task that starts the tray at sign-in.
+const TASK: &str = "opal-rs";
 
 /// The programs, when built into the installer.
 #[cfg(feature = "payload")]
@@ -227,6 +229,10 @@ fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
     if let Err(e) = make_shortcut(&dir.join("opal-rs-gui.exe"), &shortcut()) {
         eprintln!("Start menu entry: {e}");
     }
+    // Without it the Run entry still starts the tray, only later.
+    if let Err(e) = add_sign_in_task(&dir) {
+        eprintln!("{e}");
+    }
     if ask_start {
         offer_start(&dir, fresh);
     }
@@ -283,6 +289,10 @@ fn remove(ask_data: bool) -> Result<(), String> {
         let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, &HSTRING::from(UNINSTALL_KEY));
     }
     let _ = std::fs::remove_file(shortcut());
+    let mut c = Command::new(windows_program("System32\\schtasks.exe"));
+    c.args(["/Delete", "/F", "/TN", TASK]);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
+    let _ = c.output();
     for name in FILES {
         let path = dir.join(name);
         if std::fs::remove_file(&path).is_err() {
@@ -297,6 +307,52 @@ fn remove(ask_data: bool) -> Result<(), String> {
         remove_data();
     }
     Ok(())
+}
+
+/// Windows starts its Run entries one at a time, each after the one before has settled, so the tray can start
+/// minutes after sign-in. This task starts it at once, for every account; the tray leaves again when its account has
+/// Start at sign-in off, and the Run entry's later copy leaves because one is running.
+fn add_sign_in_task(dir: &Path) -> Result<(), String> {
+    let tray = dir.join("opal-rs-tray.exe").display().to_string().replace('&', "&amp;");
+    // Any account in Users, as itself; normal priority (a task's default is below normal); no time limit.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Starts the Opal C1 tray icon at sign-in when Start at sign-in is on.</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Users"><GroupId>S-1-5-32-545</GroupId><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Users"><Exec><Command>"{tray}"</Command><Arguments>{}</Arguments></Exec></Actions>
+</Task>
+"#,
+        opal_ipc::autostart::SIGN_IN
+    );
+    let file = std::env::temp_dir().join(format!("opal-rs-task-{}.xml", std::process::id()));
+    let bytes: Vec<u8> = [0xFEFF]
+        .into_iter()
+        .chain(xml.encode_utf16())
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    std::fs::write(&file, bytes).map_err(|e| format!("Cannot write {}: {e}", file.display()))?;
+    let mut c = Command::new(windows_program("System32\\schtasks.exe"));
+    c.args(["/Create", "/F", "/TN", TASK, "/XML"]).arg(&file);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
+    let out = c.output();
+    let _ = std::fs::remove_file(&file);
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "Adding the sign-in task failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("schtasks: {e}")),
+    }
 }
 
 /// Stops this account starting the removed tray at sign-in.

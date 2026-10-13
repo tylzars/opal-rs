@@ -7,6 +7,10 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+/// Passed to the tray by the Windows sign-in task, which starts it for every account: it then runs only if this
+/// account starts it at sign-in.
+pub const SIGN_IN: &str = "--sign-in";
+
 /// The package's autostart file, on for every account unless an account's own copy hides it.
 #[cfg(unix)]
 const SYSTEM_FILE: &str = "/etc/xdg/autostart/opal-rs-tray.desktop";

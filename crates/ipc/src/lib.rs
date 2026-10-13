@@ -158,7 +158,10 @@ pub fn connect() -> io::Result<Stream> {
         let text = std::fs::read_to_string(location())?;
         let (port, token) = text.trim().split_once(' ').ok_or(io::ErrorKind::InvalidData)?;
         let port: u16 = port.parse().map_err(|_| io::ErrorKind::InvalidData)?;
-        let mut s = std::net::TcpStream::connect(("127.0.0.1", port))?;
+        // The file outlives a service that was stopped by a shutdown, and a connect to its old port can take
+        // Windows 21 s to give up on; a running service answers at once.
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
         writeln!(s, "{token}")?;
         Ok(Stream(s))
     }
