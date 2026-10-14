@@ -349,10 +349,9 @@ pub fn black_frame(width: usize, height: usize) -> Vec<u8> {
     f
 }
 
-/// In low power mode apps use the camera's own USB video. Returns how many apps use it and their names, so the
-/// camera runs only while one does, as the camera's own app has it: an app closing the video stops the camera, and
-/// the next one to open it needs it started again. Windows says which apps use a camera, not which one; with the
-/// virtual camera gone in low power mode that is this one.
+/// When apps use the camera's own USB video (low power mode on Linux). Returns how many apps use it and their names,
+/// so the camera runs only while one does, as the camera's own app has it: an app closing the video stops the camera,
+/// and the next one to open it needs it started again. Windows says which apps use a camera, not which one.
 pub fn low_power_users(node: &mut Option<PathBuf>) -> (usize, Vec<String>) {
     #[cfg(unix)]
     {

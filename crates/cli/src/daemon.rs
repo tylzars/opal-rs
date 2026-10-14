@@ -26,7 +26,7 @@ const OFF_DELAY: Duration = Duration::from_secs(2);
 const STOP_AFTER: Duration = Duration::from_secs(2);
 /// Time a stop needs before the camera can be rebooted.
 pub const STOP_SETTLE: Duration = Duration::from_secs(3);
-/// In low power mode, time after a start by which the camera is taken to be sending video.
+/// When apps use the camera's own USB video, time after a start by which it is taken to be sending video.
 const LOW_POWER_START: Duration = Duration::from_secs(3);
 /// Shortest time from a stop to the next start.
 const RESTART_AFTER: Duration = Duration::from_secs(2);
@@ -277,7 +277,7 @@ struct Session {
     /// Average chip temperature in degrees C.
     temperature: Mutex<Option<f32>>,
     last_frame: Mutex<Vec<u8>>,
-    /// Where the video goes; none in low power mode or without an output.
+    /// Where the video goes; none when apps use the camera's own USB video, or without an output.
     outputs: Arc<Mutex<Option<crate::output::Outputs>>>,
     alive: AtomicBool,
 }
@@ -534,7 +534,9 @@ impl Session {
 
     fn run_command(&self, line: &str) -> Result<String> {
         let words: Vec<&str> = line.split_whitespace().collect();
-        if self.low_power && words.first().is_some_and(|w| is_effect(w)) {
+        // Presets carry effects and stickers too.
+        let preset = matches!(words.as_slice(), ["preset", "load" | "save", ..]);
+        if self.low_power && (preset || words.first().is_some_and(|w| is_effect(w))) {
             bail!("not available in low power mode");
         }
         match words.as_slice() {
@@ -1670,8 +1672,9 @@ pub fn run(
         }
     }
     done.store(true, Ordering::Relaxed);
-    // A restart boots the camera again straight away, so it is reset to its bootloader for that.
-    if RESTART.load(Ordering::Relaxed) {
+    // A restart boots the camera again straight away, so it is reset to its bootloader for that. A service told to
+    // stop at the same time leaves it running instead, as every stop does.
+    if RESTART.load(Ordering::Relaxed) && !crate::stopped() {
         dev.restart_on_close();
     }
     let _ = temperature.join();

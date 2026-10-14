@@ -169,6 +169,8 @@ enum Wait {
     /// Windows 10, which has no virtual camera.
     #[cfg(windows)]
     Windows10,
+    /// The virtual camera could not be opened; the camera was not touched.
+    Output(String),
 }
 
 impl std::fmt::Display for Wait {
@@ -178,6 +180,7 @@ impl std::fmt::Display for Wait {
             Wait::Usb2 => "the camera is connected over USB 2",
             #[cfg(windows)]
             Wait::Windows10 => "this Windows has no virtual camera (Windows 11 is needed)",
+            Wait::Output(e) => return write!(f, "the virtual camera did not open: {e}"),
         })
     }
 }
@@ -188,7 +191,7 @@ impl std::error::Error for Wait {}
 static SETTINGS_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Answers the control channel while no camera session does: `status` says what the service waits for.
-fn serve_idle(listener: Arc<opal_ipc::Listener>) {
+fn serve_idle(listener: Arc<opal_ipc::Listener>, outputs: Arc<Mutex<Option<output::Outputs>>>) {
     while !stopped() {
         if daemon::SERVING.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
@@ -196,7 +199,7 @@ fn serve_idle(listener: Arc<opal_ipc::Listener>) {
         }
         match listener.accept() {
             Ok(Some(stream)) => {
-                if let Err(e) = answer_idle(stream) {
+                if let Err(e) = answer_idle(stream, &outputs) {
                     eprintln!("control: {e}");
                 }
             }
@@ -209,7 +212,7 @@ fn serve_idle(listener: Arc<opal_ipc::Listener>) {
     }
 }
 
-fn answer_idle(stream: opal_ipc::Stream) -> Result<()> {
+fn answer_idle(stream: opal_ipc::Stream, outputs: &Mutex<Option<output::Outputs>>) -> Result<()> {
     use std::io::{BufRead, Read, Write};
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -228,6 +231,19 @@ fn answer_idle(stream: opal_ipc::Stream) -> Result<()> {
         },
         ["quit"] => {
             request_stop();
+            "ok".to_owned()
+        }
+        // The virtual cameras stay open between sessions, so changing them works the same without a camera.
+        ["cameras", "release"] => {
+            if let Some(o) = outputs.locked().as_mut() {
+                o.release();
+            }
+            "ok".to_owned()
+        }
+        ["cameras", "open"] => {
+            if let Some(o) = outputs.locked().as_mut() {
+                o.reopen();
+            }
             "ok".to_owned()
         }
         _ => "error: the camera is not ready".to_owned(),
@@ -268,12 +284,21 @@ fn firmware_asset() -> &'static Asset {
 
 fn wait_for_camera(timeout: Duration) -> Option<opal_xlink::Found> {
     let start = Instant::now();
+    let mut said = false;
     loop {
         if let Some(d) = first_camera() {
+            if said {
+                set_waiting("starting");
+            }
             return Some(d);
         }
         if start.elapsed() > timeout || stopped() {
             return None;
+        }
+        // Not at once: a restarting camera is off USB for a moment.
+        if !said && start.elapsed() > Duration::from_secs(3) {
+            set_waiting("camera");
+            said = true;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -365,6 +390,25 @@ fn lock_camera() -> Result<std::fs::File> {
 /// Restarts after the camera goes away are limited, so a camera that keeps failing is left alone.
 const MAX_RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(600);
+/// Time a camera just plugged in gets before it is booted.
+const PLUGGED_SETTLE: Duration = Duration::from_secs(3);
+/// How often a virtual camera that did not open is tried again.
+const OUTPUT_RETRY: Duration = Duration::from_secs(10);
+/// A camera that resets itself as it fails is gone for a second or so; someone unplugging it, for longer.
+const REPLUG_GONE: Duration = Duration::from_secs(3);
+
+/// Waits for the camera to be unplugged and plugged in again: gone for at least [`REPLUG_GONE`], then back. Already
+/// unplugged counts as the first half.
+fn wait_replug() -> bool {
+    let mut gone_since: Option<Instant> = None;
+    wait_until(|| match first_camera() {
+        Some(_) => gone_since.take().is_some_and(|t| t.elapsed() >= REPLUG_GONE),
+        None => {
+            gone_since.get_or_insert_with(Instant::now);
+            false
+        }
+    })
+}
 
 /// Sleeps for `d`, or less if the service is told to stop.
 fn sleep_unless_stopped(d: Duration) {
@@ -417,9 +461,13 @@ fn run_session(
         kept.registration = None;
     } else if kept.outputs.locked().is_none() {
         let (w, h) = settings.resolution().size();
-        if let Some((o, r)) = output::open(output.map(Path::to_path_buf), w as usize, h as usize)? {
-            *kept.outputs.locked() = Some(o);
-            kept.registration = Some(r);
+        match output::open(output.map(Path::to_path_buf), w as usize, h as usize) {
+            Ok(Some((o, r))) => {
+                *kept.outputs.locked() = Some(o);
+                kept.registration = Some(r);
+            }
+            Ok(None) => {}
+            Err(e) => return Err(Wait::Output(format!("{e:#}")).into()),
         }
     }
     let booted = boot(dir, webcam, planned)?;
@@ -431,7 +479,7 @@ fn run_session(
     if matches!(info.usb.as_str(), "low" | "full" | "high") {
         return Err(opal_dai::boot::Error::SlowUsb.into());
     }
-    // Low power mode streams 1080p, the only size the camera's own USB video sends.
+    // Low power mode is always 1080p: the only size the camera's own USB video sends, and on Windows the least work.
     let resolution = if low_power {
         opal_c1::Resolution::P1080
     } else {
@@ -590,9 +638,10 @@ fn main() -> Result<ExitCode> {
             }
             let listener =
                 Arc::new(opal_ipc::Listener::bind().with_context(|| opal_ipc::location().display().to_string())?);
+            let outputs: Arc<Mutex<Option<output::Outputs>>> = Arc::default();
             {
-                let listener = listener.clone();
-                std::thread::spawn(move || serve_idle(listener));
+                let (listener, outputs) = (listener.clone(), outputs.clone());
+                std::thread::spawn(move || serve_idle(listener, outputs));
             }
             if let Some(path) = output.as_ref().filter(|_| !settings.low_power()) {
                 if !path.exists() {
@@ -613,8 +662,9 @@ fn main() -> Result<ExitCode> {
             let mut settings = Some(settings);
             let mut restarts: Vec<Instant> = Vec::new();
             let mut planned = false;
+            let mut last_wait: Option<String> = None;
             let mut kept = Kept {
-                outputs: Arc::default(),
+                outputs,
                 registration: None,
                 listener,
             };
@@ -625,7 +675,7 @@ fn main() -> Result<ExitCode> {
                     None => settings::Settings::load(&settings_path),
                 };
                 let result = run_session(&dir, output.as_deref(), settings, &overrides, &mut kept, planned);
-                planned = false;
+                let was_planned = std::mem::take(&mut planned);
                 if let Some(o) = kept.outputs.locked().as_mut() {
                     o.blank();
                 }
@@ -650,11 +700,19 @@ fn main() -> Result<ExitCode> {
                 let err = result.err().unwrap_or_else(|| anyhow::anyhow!("session ended"));
                 // Nothing was sent to the camera: wait for it to be plugged in, or to be on USB 3.
                 if let Some(wait) = err.downcast_ref::<Wait>() {
-                    eprintln!("{} {err}; waiting", platform::log_time());
+                    // Once per reason, not on every retry.
+                    let said = err.to_string();
+                    if last_wait.as_deref() != Some(said.as_str()) {
+                        eprintln!("{} {said}; waiting", platform::log_time());
+                        last_wait = Some(said);
+                    }
                     let ready = match wait {
                         Wait::Camera => {
                             set_waiting("camera");
-                            wait_until(|| first_camera().is_some())
+                            // A camera just plugged in is still starting up; booting it at once fails.
+                            let ready = wait_until(|| first_camera().is_some());
+                            sleep_unless_stopped(PLUGGED_SETTLE);
+                            ready && !stopped()
                         }
                         Wait::Usb2 => {
                             set_waiting("usb2");
@@ -665,6 +723,14 @@ fn main() -> Result<ExitCode> {
                         Wait::Windows10 => {
                             set_waiting("windows10");
                             wait_until(|| false)
+                        }
+                        // Not the camera's fault, so not counted against it: tried again in a while. The camera was
+                        // not touched, so a planned restart stays planned.
+                        Wait::Output(_) => {
+                            planned = was_planned;
+                            set_waiting("output");
+                            sleep_unless_stopped(OUTPUT_RETRY);
+                            !stopped()
                         }
                     };
                     if !ready {
@@ -680,7 +746,7 @@ fn main() -> Result<ExitCode> {
                         platform::log_time()
                     );
                     set_waiting("replug");
-                    if !wait_until(|| first_camera().is_none()) || !wait_until(|| first_camera().is_some()) {
+                    if !wait_replug() {
                         break;
                     }
                     restarts.clear();
@@ -692,11 +758,37 @@ fn main() -> Result<ExitCode> {
                     err.downcast_ref::<opal_dai::boot::Error>(),
                     Some(opal_dai::boot::Error::SlowUsb)
                 );
-                set_waiting(if slow { "usb2" } else { "starting" });
-                if !wait_until(|| first_camera().is_some_and(|c| !c.slow_usb())) {
+                // Booted onto USB 2: the USB 3 link sometimes does not come up as the camera starts. Starting it again
+                // from its bootloader usually brings it; counted above like any other failed start.
+                if slow && let Some(camera) = first_camera().filter(|c| c.state == opal_xlink::State::Booted) {
+                    eprintln!("{} starting the camera again for USB 3", platform::log_time());
+                    set_waiting("starting");
+                    if opal_xlink::bootloader::reboot_to_bootloader(&camera.info).is_ok() {
+                        let start = Instant::now();
+                        planned = wait_until(|| {
+                            start.elapsed() > Duration::from_secs(10)
+                                || first_camera().is_some_and(|c| c.state == opal_xlink::State::Bootloader)
+                        }) && first_camera().is_some_and(|c| c.state == opal_xlink::State::Bootloader);
+                        if planned {
+                            continue;
+                        }
+                    }
+                }
+                // Says what it waits for as that changes: unplugged, or plugged in on USB 2.
+                if !wait_until(|| {
+                    let camera = first_camera();
+                    set_waiting(match &camera {
+                        None => "camera",
+                        Some(c) if slow || c.slow_usb() => "usb2",
+                        Some(_) => "starting",
+                    });
+                    camera.is_some_and(|c| !c.slow_usb())
+                }) {
                     break;
                 }
-                sleep_unless_stopped(boot_wait());
+                set_waiting("starting");
+                // Also time for a camera just plugged in again to start up.
+                sleep_unless_stopped(boot_wait().max(PLUGGED_SETTLE));
                 if stopped() {
                     break;
                 }
@@ -819,9 +911,11 @@ fn camera_command(command: Option<CamerasCommand>) -> Result<ExitCode> {
         }
         CamerasCommand::Apply => {}
     }
+    // An idle service answers with an error: nothing is in use then.
     let in_use = opal_ipc::request("cameras", Duration::from_secs(3)).is_ok_and(|l| {
-        l.split(" | ")
-            .any(|c| c.split(' ').nth(2).is_some_and(|apps| apps != "-"))
+        !l.starts_with("error:")
+            && l.split(" | ")
+                .any(|c| c.split(' ').nth(2).is_some_and(|apps| apps != "-"))
     });
     let released = !in_use && opal_ipc::request("cameras release", Duration::from_secs(3)).is_ok();
     let exe = std::env::current_exe()?.display().to_string();

@@ -63,14 +63,17 @@ pub fn waiting_text(code: &str) -> (&'static str, &'static str) {
             "The camera is connected over USB 2",
             "Unplug it and plug it back in. If this keeps happening, use a USB 3 port.",
         ),
-        "replug" => ("The camera stopped responding", "Unplug it and plug it back in."),
+        "replug" => (
+            "The camera stopped responding",
+            "Unplug it, wait a few seconds, then plug it back in.",
+        ),
         "windows10" => (
             "Windows 11 is needed",
             "Opal C1 still works as a plain webcam: in applications, choose \"Opal C1\".",
         ),
         "output" => (
-            "Opal C1 Virtual is not set up yet",
-            "Restart the computer to finish setting it up.",
+            "Opal C1 Virtual is not ready",
+            "Restart the computer. If this keeps happening, install Opal C1 again.",
         ),
         _ => ("Starting the camera", ""),
     }
@@ -161,7 +164,9 @@ pub fn connect() -> io::Result<Stream> {
         // The file outlives a service that was stopped by a shutdown, and a connect to its old port can take
         // Windows 21 s to give up on; a running service answers at once.
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+        // Whatever the reason, nothing answers there: the same as no service.
+        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+            .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
         writeln!(s, "{token}")?;
         Ok(Stream(s))
     }
