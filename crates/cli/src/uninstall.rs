@@ -251,6 +251,13 @@ pub fn uninstall(keep_data: bool, yes: bool, dry_run: bool) -> Result<bool> {
         }
     }
     let ok = carry_out(&steps);
+    if !ok {
+        #[cfg(unix)]
+        println!("Not everything was removed (see above). Run `opal-rs uninstall` again in a terminal.");
+        #[cfg(windows)]
+        println!("Not everything was removed (see above). Run `opal-rs uninstall` again.");
+        return Ok(false);
+    }
     #[cfg(unix)]
     println!(
         "Done. v4l2loopback stays loaded until a restart; `sudo apt autoremove` removes v4l2loopback-dkms if \
@@ -258,7 +265,7 @@ pub fn uninstall(keep_data: bool, yes: bool, dry_run: bool) -> Result<bool> {
     );
     #[cfg(windows)]
     println!("Done.");
-    Ok(ok)
+    Ok(true)
 }
 
 #[cfg(test)]
