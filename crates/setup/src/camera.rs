@@ -8,7 +8,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_GETIDLIST_FILTER_ENUMERATOR, CM_Get_DevNode_Registry_PropertyW, CM_Get_DevNode_Status,
     CM_Get_Device_ID_List_SizeW, CM_Get_Device_ID_ListW, CM_LOCATE_DEVNODE_PHANTOM, CM_Locate_DevNodeW,
     CM_Open_DevNode_Key, CM_PROB, CM_REGISTRY_HARDWARE, CM_Set_DevNode_Registry_PropertyW, CONFIGFLAG_DISABLED,
-    CR_SUCCESS, RegDisposition_OpenAlways,
+    CR_BUFFER_SMALL, CR_SUCCESS, RegDisposition_OpenAlways,
 };
 use windows::Win32::System::Registry::{
     HKEY, KEY_ALL_ACCESS, REG_DWORD, RegCloseKey, RegDeleteValueW, RegQueryValueExW, RegSetValueExW,
@@ -65,21 +65,28 @@ fn devices() -> Vec<(u32, HKEY)> {
 }
 
 fn ids() -> Vec<String> {
-    let mut len = 0;
-    let mut list = Vec::new();
-    unsafe {
-        if CM_Get_Device_ID_List_SizeW(&mut len, w!("USB"), CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS {
-            return Vec::new();
-        }
-        list.resize(len as usize, 0u16);
-        if CM_Get_Device_ID_ListW(w!("USB"), &mut list, CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS {
-            return Vec::new();
+    // The list can grow between asking its size and reading it, as when a device is being plugged in: tried again.
+    for _ in 0..5 {
+        let mut len = 0;
+        unsafe {
+            if CM_Get_Device_ID_List_SizeW(&mut len, w!("USB"), CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS {
+                return Vec::new();
+            }
+            let mut list = vec![0u16; len as usize];
+            match CM_Get_Device_ID_ListW(w!("USB"), &mut list, CM_GETIDLIST_FILTER_ENUMERATOR) {
+                CR_SUCCESS => {
+                    return list
+                        .split(|&c| c == 0)
+                        .map(String::from_utf16_lossy)
+                        .filter(|id| id.to_ascii_uppercase().starts_with(PREFIX))
+                        .collect();
+                }
+                CR_BUFFER_SMALL => continue,
+                _ => return Vec::new(),
+            }
         }
     }
-    list.split(|&c| c == 0)
-        .map(String::from_utf16_lossy)
-        .filter(|id| id.to_ascii_uppercase().starts_with(PREFIX))
-        .collect()
+    Vec::new()
 }
 
 fn marked(key: HKEY) -> bool {

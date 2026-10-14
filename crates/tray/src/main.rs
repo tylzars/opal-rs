@@ -15,7 +15,7 @@ mod windows;
 
 /// Sends one command to the service and returns its reply.
 fn send(command: &str) -> Option<String> {
-    // Short: the tray's window waits on this.
+    // Short: the tray's status and commands wait on this, off its window's thread.
     opal_ipc::request(command, Duration::from_secs(1)).ok()
 }
 

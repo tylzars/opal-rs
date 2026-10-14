@@ -127,6 +127,58 @@ fn copy(from: &Path, to: &Path) -> Result {
         .map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))
 }
 
+/// Points the installer's header at its load configuration (see `crates/setup/src/main.rs`), which the MinGW linker
+/// leaves out: found by its size and "OPAL" time stamp, then given as data directory 10.
+fn point_at_load_config(exe: &Path) -> Result {
+    const SIZE: u32 = 0x140;
+    let fail = |why: &str| format!("{}: {why}", exe.display());
+    let mut pe = std::fs::read(exe).map_err(|e| fail(&e.to_string()))?;
+    if pe.len() < 0x400 {
+        return Err(fail("too short for a program"));
+    }
+    let u16_at = |b: &[u8], o: usize| b.get(o..o + 2).map_or(0, |s| u16::from_le_bytes([s[0], s[1]]));
+    let u32_at = |b: &[u8], o: usize| {
+        b.get(o..o + 4)
+            .map_or(0, |s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    let header = u32_at(&pe, 0x3c) as usize;
+    if pe.get(header..header + 4) != Some(b"PE\0\0".as_slice()) {
+        return Err(fail("not a PE file"));
+    }
+    let sections = u16_at(&pe, header + 6) as usize;
+    let optional = header + 24;
+    if u16_at(&pe, optional) != 0x20b {
+        return Err(fail("not a 64-bit program"));
+    }
+    if u32_at(&pe, optional + 108) < 11 {
+        return Err(fail("no room for a load configuration in the header"));
+    }
+    let mut mark = SIZE.to_le_bytes().to_vec();
+    mark.extend_from_slice(b"OPAL");
+    let at: Vec<usize> = pe
+        .windows(mark.len())
+        .enumerate()
+        .filter(|(_, w)| *w == mark)
+        .map(|(i, _)| i)
+        .collect();
+    let [file_offset] = at[..] else {
+        return Err(fail(&format!("expected one load configuration, found {}", at.len())));
+    };
+    let table = optional + u16_at(&pe, header + 20) as usize;
+    let rva = (0..sections)
+        .map(|i| table + i * 40)
+        .find_map(|s| {
+            let (virt, raw, raw_size) = (u32_at(&pe, s + 12), u32_at(&pe, s + 20), u32_at(&pe, s + 16));
+            let off = file_offset as u32;
+            (off >= raw && off + SIZE <= raw + raw_size).then(|| virt + (off - raw))
+        })
+        .ok_or_else(|| fail("load configuration outside every section"))?;
+    let entry = optional + 112 + 10 * 8;
+    pe[entry..entry + 4].copy_from_slice(&rva.to_le_bytes());
+    pe[entry + 4..entry + 8].copy_from_slice(&SIZE.to_le_bytes());
+    std::fs::write(exe, pe).map_err(|e| fail(&e.to_string()))
+}
+
 fn deb() -> Result {
     if !cfg!(target_os = "linux") {
         return Err("the .deb is built on Linux".into());
@@ -179,6 +231,9 @@ fn exe(target: &str) -> Result {
     run(build(&["-p", "opal-setup", "--features", "payload"]).env("OPAL_RS_PAYLOAD", &payload))?;
     let out = dist_dir()?.join("opal-rs-setup.exe");
     copy(&release.join("opal-rs-setup.exe"), &out)?;
+    if target.ends_with("-gnu") {
+        point_at_load_config(&out)?;
+    }
     println!("done: {}", out.display());
     Ok(())
 }

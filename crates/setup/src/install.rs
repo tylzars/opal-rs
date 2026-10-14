@@ -4,18 +4,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GetLastError};
 use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD, REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_MULTI_SZ,
     RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
 };
-use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+use windows::Win32::System::Threading::{CreateMutexW, GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
-    IShellLinkW, IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW, ShellLink,
+    FOLDERID_CommonPrograms, FOLDERID_ProgramFiles, IShellLinkW, IsUserAnAdmin, KF_FLAG_DEFAULT,
+    SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
@@ -31,6 +33,10 @@ const BUSY_WAIT: Duration = Duration::from_secs(5);
 const SHARING_VIOLATION: i32 = 32;
 /// What is installed, in this order.
 const FILES: [&str; 4] = ["opal-rs.exe", "opal-rs-gui.exe", "opal-rs-tray.exe", "opal_vcam.dll"];
+/// Exit code of the administrator copy when an update needs a restart to finish (Windows' own code for it).
+const RESTART_NEEDED: u32 = 3010;
+/// The old virtual camera is still loaded; said even if setup fails afterwards.
+static RESTART_FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The scheduled task that starts the tray at sign-in.
 const TASK: &str = "opal-rs";
 /// The scheduled task that switches off the camera's own webcam, and the argument that has setup do it.
@@ -63,16 +69,31 @@ fn message(text: &str, style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBO
     unsafe { MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(TITLE), style) == IDYES }
 }
 
+/// A folder as Windows knows it, not as the environment says: the administrator copy should not follow variables the
+/// signed-in account can set.
+fn known_folder(id: windows::core::GUID, fallback: &str) -> PathBuf {
+    unsafe {
+        match SHGetKnownFolderPath(&id, KF_FLAG_DEFAULT, None) {
+            Ok(p) => {
+                let path = p.to_string().map_or_else(|_| PathBuf::from(fallback), PathBuf::from);
+                CoTaskMemFree(Some(p.0 as *const _));
+                path
+            }
+            Err(_) => PathBuf::from(fallback),
+        }
+    }
+}
+
 fn install_dir() -> PathBuf {
-    std::env::var_os("ProgramFiles")
-        .map_or_else(|| PathBuf::from("C:\\Program Files"), PathBuf::from)
-        .join("opal-rs")
+    known_folder(FOLDERID_ProgramFiles, "C:\\Program Files").join("opal-rs")
 }
 
 fn shortcut() -> PathBuf {
-    std::env::var_os("ProgramData")
-        .map_or_else(|| PathBuf::from("C:\\ProgramData"), PathBuf::from)
-        .join("Microsoft\\Windows\\Start Menu\\Programs\\Opal C1 Control.lnk")
+    known_folder(
+        FOLDERID_CommonPrograms,
+        "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs",
+    )
+    .join("Opal C1 Control.lnk")
 }
 
 /// Tells the administrator copy that the signed-in user's copy deals with that user: their data, and starting the
@@ -86,6 +107,18 @@ pub fn main() {
         return;
     }
     let uninstall = args.first().is_some_and(|a| a == "uninstall");
+    let user_asks = args.iter().any(|a| a == USER_ASKS);
+    // One setup at a time; the administrator copy this one starts is part of it.
+    let name: Vec<u16> = "Local\\opal-rs-setup".encode_utf16().chain([0]).collect();
+    let one = (!user_asks).then(|| unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) });
+    // Denied too: one started as administrator owns it.
+    let taken = one
+        .as_ref()
+        .is_some_and(|m| m.is_err() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS);
+    if taken {
+        message("Opal C1 setup is already running.", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     let fresh = !install_dir().join("opal-rs-tray.exe").exists();
     if !unsafe { IsUserAnAdmin() }.as_bool() {
         // Runs again as administrator, which can be another account, so this copy stops this user's service, and
@@ -96,34 +129,60 @@ pub fn main() {
         } else {
             USER_ASKS.to_owned()
         };
-        match (run_as_admin(&args), uninstall) {
-            (true, true) => {
+        let done = run_as_admin(&args);
+        match (done, uninstall) {
+            (Some(0), true) => {
                 stop_autostart();
                 remove_data();
             }
-            (true, false) => offer_start(&install_dir(), fresh),
+            (Some(0), false) => offer_start(&install_dir(), fresh, false),
+            (Some(RESTART_NEEDED), false) => offer_start(&install_dir(), fresh, true),
             // Cancelled or failed: put back what was running.
-            (false, _) if was_running => {
-                let _ = opal_ipc::start_service_with(&install_dir().join("opal-rs.exe"));
+            _ => {
+                if was_running {
+                    let _ = opal_ipc::start_service_with(&install_dir().join("opal-rs.exe"));
+                }
+                match done {
+                    None => {
+                        message(
+                            "Setup needs permission to make changes, so nothing was changed.",
+                            MB_OK | MB_ICONINFORMATION,
+                        );
+                    }
+                    // 1: the administrator copy said what went wrong itself. Anything else: it stopped early.
+                    Some(1) => {}
+                    Some(_) => {
+                        message("Setup stopped before it finished. Run it again.", MB_OK | MB_ICONERROR);
+                    }
+                }
             }
-            (false, _) => {}
         }
         return;
     }
-    let user_asks = args.iter().any(|a| a == USER_ASKS);
     let result = if uninstall {
-        remove(!user_asks)
+        remove(!user_asks).map(|()| false)
     } else {
         install(!user_asks, fresh)
     };
-    if let Err(e) = result {
-        message(&e, MB_OK | MB_ICONERROR);
-        std::process::exit(1);
+    match result {
+        Err(e) => {
+            let restart = if RESTART_FIRST.load(std::sync::atomic::Ordering::Relaxed) {
+                "\n\nRestart the computer before running setup again."
+            } else {
+                ""
+            };
+            message(&format!("{e}{restart}"), MB_OK | MB_ICONERROR);
+            std::process::exit(1);
+        }
+        // Told to this account's copy, which says it.
+        Ok(true) if user_asks => std::process::exit(RESTART_NEEDED as i32),
+        Ok(_) => {}
     }
 }
 
-/// Runs this program again as administrator and waits for it. True if it succeeded.
-fn run_as_admin(args: &str) -> bool {
+/// Runs this program again as administrator and waits for it. Its exit code (0 done, [`RESTART_NEEDED`], else
+/// failed), or None if it did not run (permission refused).
+fn run_as_admin(args: &str) -> Option<u32> {
     let exe = HSTRING::from(std::env::current_exe().unwrap_or_default().as_os_str());
     let (verb, params) = (HSTRING::from("runas"), HSTRING::from(args));
     let mut info = SHELLEXECUTEINFOW {
@@ -137,19 +196,21 @@ fn run_as_admin(args: &str) -> bool {
     };
     unsafe {
         if ShellExecuteExW(&mut info).is_err() || info.hProcess.is_invalid() {
-            return false;
+            return None;
         }
         WaitForSingleObject(info.hProcess, INFINITE);
         let mut code = 1;
         let _ = GetExitCodeProcess(info.hProcess, &mut code);
         let _ = CloseHandle(info.hProcess);
-        code == 0
+        Some(code)
     }
 }
 
-/// Installs; with `ask_start`, also offers to start the programs (when no user copy will).
-fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
+/// Installs; with `ask_start`, also offers to start the programs (when no user copy will). True when a restart is
+/// needed to finish.
+fn install(ask_start: bool, fresh: bool) -> Result<bool, String> {
     let dir = install_dir();
+    let mut restart = false;
     let source = std::env::current_exe().map_err(|e| e.to_string())?;
     let source_dir = source.parent().map(Path::to_path_buf).unwrap_or_default();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
@@ -187,6 +248,9 @@ fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
             if std::fs::rename(&to, &old).is_ok() {
                 delete_at_restart(&old);
                 written = write();
+                // Windows' camera service keeps the old one until then.
+                restart = true;
+                RESTART_FIRST.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         if let Err(e) = written {
@@ -245,14 +309,14 @@ fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
     }
     crate::camera::hide();
     if ask_start {
-        offer_start(&dir, fresh);
+        offer_start(&dir, fresh, restart);
     }
-    Ok(())
+    Ok(restart)
 }
 
 /// Says it is installed and offers to start the tray and the control panel, as whoever runs this. A `fresh` install
 /// starts at sign-in for this account; an update keeps the account's choice.
-fn offer_start(dir: &Path, fresh: bool) {
+fn offer_start(dir: &Path, fresh: bool, restart: bool) {
     if fresh && let Err(e) = opal_ipc::autostart::set(true, &dir.join("opal-rs-tray.exe")) {
         eprintln!("start at sign-in: {e}");
     }
@@ -274,8 +338,13 @@ fn offer_start(dir: &Path, fresh: bool) {
     } else {
         ""
     };
+    let restart = if restart {
+        "\n\nRestart the computer to finish updating Opal C1 Virtual; until then it may show no picture."
+    } else {
+        ""
+    };
     let start = message(
-        &format!("Opal C1 is installed{at_sign_in}.{windows10}\n\nStart it now?{ask}"),
+        &format!("Opal C1 is installed{at_sign_in}.{windows10}{restart}\n\nStart it now?{ask}"),
         MB_YESNO | MB_ICONINFORMATION,
     );
     if start {
@@ -303,6 +372,8 @@ fn remove(ask_data: bool) -> Result<(), String> {
     delete_task(TASK);
     delete_task(CAMERA_TASK);
     crate::camera::unhide();
+    // Every account's Start at sign-in, which would point at the removed tray.
+    crate::accounts::clear_run_value(opal_ipc::autostart::RUN_NAME);
     for name in FILES {
         let path = dir.join(name);
         if std::fs::remove_file(&path).is_err() {
@@ -375,7 +446,8 @@ fn add_camera_task(dir: &Path) -> Result<(), String> {
 
 /// Adds or replaces a scheduled task from its XML.
 fn add_task(name: &str, xml: &str) -> Result<(), String> {
-    let file = std::env::temp_dir().join(format!("opal-rs-task-{}.xml", std::process::id()));
+    // In the install folder, which only administrators can change, not in this account's temporary folder.
+    let file = install_dir().join(format!("task-{}.xml", std::process::id()));
     let bytes: Vec<u8> = [0xFEFF]
         .into_iter()
         .chain(xml.encode_utf16())
@@ -475,9 +547,14 @@ fn stop_frame_server() {
 
 /// A program in the Windows folder, by full path so a file of the same name next to setup is not run instead.
 fn windows_program(name: &str) -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from)
-        .join(name)
+    let mut buf = [0u16; 260];
+    let n = unsafe { GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    let windows = if n > 0 && n < buf.len() {
+        PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+    } else {
+        PathBuf::from("C:\\Windows")
+    };
+    windows.join(name)
 }
 
 fn delete_at_restart(path: &Path) {

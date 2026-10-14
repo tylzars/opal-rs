@@ -7,6 +7,9 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
+/// The account's Run value on Windows.
+pub const RUN_NAME: &str = "opal-rs";
+
 /// Passed to the tray by the Windows sign-in task, which starts it for every account: it then runs only if this
 /// account starts it at sign-in.
 pub const SIGN_IN: &str = "--sign-in";
@@ -73,7 +76,7 @@ mod registry {
     const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     /// Where Windows' own startup settings mark a Run entry switched off.
     const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-    const NAME: &str = "opal-rs";
+    const NAME: &str = super::RUN_NAME;
     const NOT_FOUND: u32 = 2;
 
     fn wide(s: &str) -> Vec<u16> {

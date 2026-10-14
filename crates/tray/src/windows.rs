@@ -1,6 +1,7 @@
 //! The tray icon in the Windows notification area, with the same menu as on Linux.
 
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
@@ -64,9 +65,26 @@ pub fn run() {
         eprintln!("no notification area available");
         std::process::exit(1);
     };
-    let mut last_poll = Instant::now()
-        .checked_sub(Duration::from_secs(10))
-        .unwrap_or_else(Instant::now);
+    // The service is asked from another thread, so a slow or stopped one never holds up the menu.
+    let latest: Arc<Mutex<Option<String>>> = Arc::default();
+    let poller = {
+        let latest = latest.clone();
+        std::thread::spawn(move || {
+            loop {
+                let status = send("status").unwrap_or_default();
+                *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+                std::thread::park_timeout(Duration::from_secs(2));
+            }
+        })
+    };
+    // A command, then a fresh status, both off this thread.
+    let command = |c: &'static str| {
+        let poller = poller.thread().clone();
+        std::thread::spawn(move || {
+            send(c);
+            poller.unpark();
+        });
+    };
     let mut shown = None;
     loop {
         // The tray's window lives on this thread, so its messages are handled here.
@@ -77,12 +95,11 @@ pub fn run() {
                 DispatchMessageW(&msg);
             }
         }
-        let mut changed = false;
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == video.id() {
-                send(if tray.video_off() { "video on" } else { "video off" });
+                command(if tray.video_off() { "video on" } else { "video off" });
             } else if let Some(i) = modes.iter().position(|m| event.id == *m.id()) {
-                send(MODES[i].1);
+                command(MODES[i].1);
             } else if event.id == panel.id() {
                 open_panel();
             } else if event.id == autostart.id() {
@@ -91,34 +108,31 @@ pub fn run() {
             } else if event.id == hide.id() {
                 return;
             }
-            changed = true;
-        }
-        if changed {
             // A clicked item toggles its own tick; redraw so it shows the real state.
             shown = None;
         }
-        if changed || last_poll.elapsed() >= Duration::from_secs(2) {
-            last_poll = Instant::now();
-            tray.status = send("status").unwrap_or_default();
-            let state = (
-                tray.summary(),
-                tray.colour(),
-                tray.video_off(),
-                tray.mode(),
-                tray.running(),
-            );
-            if shown.as_ref() != Some(&state) {
-                let _ = icon_tray.set_icon(Some(icon(tray.colour())));
-                let _ = icon_tray.set_tooltip(Some(format!("Opal C1: {}", tray.summary())));
-                summary.set_text(tray.summary());
-                video.set_enabled(tray.running());
-                video.set_checked(!tray.video_off());
-                for (i, m) in modes.iter().enumerate() {
-                    m.set_enabled(tray.running());
-                    m.set_checked(tray.running() && tray.mode() == i);
-                }
-                shown = Some(state);
+        let status = latest.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(status) = status {
+            tray.status = status;
+        }
+        let state = (
+            tray.summary(),
+            tray.colour(),
+            tray.video_off(),
+            tray.mode(),
+            tray.running(),
+        );
+        if shown.as_ref() != Some(&state) {
+            let _ = icon_tray.set_icon(Some(icon(tray.colour())));
+            let _ = icon_tray.set_tooltip(Some(format!("Opal C1: {}", tray.summary())));
+            summary.set_text(tray.summary());
+            video.set_enabled(tray.running());
+            video.set_checked(!tray.video_off());
+            for (i, m) in modes.iter().enumerate() {
+                m.set_enabled(tray.running());
+                m.set_checked(tray.running() && tray.mode() == i);
             }
+            shown = Some(state);
         }
         std::thread::sleep(Duration::from_millis(30));
     }
