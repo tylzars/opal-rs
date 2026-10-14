@@ -613,8 +613,8 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     }
 }
 
-/// Which camera to pick in apps. They also list the camera's own "Opal C1", which has video only in low power mode
-/// on Linux.
+/// Which camera to pick in apps. On Linux they also list the camera's own "Opal C1", which has video only in low
+/// power mode.
 fn camera_hint(app: &App, ui: &mut Ui) {
     if app.c.own_video() || !app.connected {
         return;

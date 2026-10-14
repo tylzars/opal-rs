@@ -11,8 +11,8 @@ and the rest applied. A control panel and a tray icon change it all, even during
    firmware and AI models.
 3. In applications, choose **"Opal C1 Virtual"**.
 
-Applications also list the camera's own "Opal C1", which gives no video while opal-rs runs the camera (except in low
-power mode on Linux).
+On Linux, applications also list the camera's own "Opal C1", which gives no video while opal-rs runs the camera
+(except in low power mode). On Windows it gives no video at the sizes applications ask for, so setup switches it off.
 
 ## Features
 | | |

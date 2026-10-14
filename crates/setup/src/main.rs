@@ -2,6 +2,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod camera;
+#[cfg(windows)]
 mod install;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod pending;

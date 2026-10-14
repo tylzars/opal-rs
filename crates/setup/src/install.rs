@@ -33,6 +33,9 @@ const SHARING_VIOLATION: i32 = 32;
 const FILES: [&str; 4] = ["opal-rs.exe", "opal-rs-gui.exe", "opal-rs-tray.exe", "opal_vcam.dll"];
 /// The scheduled task that starts the tray at sign-in.
 const TASK: &str = "opal-rs";
+/// The scheduled task that switches off the camera's own webcam, and the argument that has setup do it.
+const CAMERA_TASK: &str = "opal-rs-camera";
+const HIDE_CAMERA: &str = "hide-camera";
 
 /// The programs, when built into the installer.
 #[cfg(feature = "payload")]
@@ -78,6 +81,10 @@ const USER_ASKS: &str = "--user-asks";
 
 pub fn main() {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == HIDE_CAMERA) {
+        crate::camera::hide();
+        return;
+    }
     let uninstall = args.first().is_some_and(|a| a == "uninstall");
     let fresh = !install_dir().join("opal-rs-tray.exe").exists();
     if !unsafe { IsUserAnAdmin() }.as_bool() {
@@ -233,6 +240,10 @@ fn install(ask_start: bool, fresh: bool) -> Result<(), String> {
     if let Err(e) = add_sign_in_task(&dir) {
         eprintln!("{e}");
     }
+    if let Err(e) = add_camera_task(&dir) {
+        eprintln!("{e}");
+    }
+    crate::camera::hide();
     if ask_start {
         offer_start(&dir, fresh);
     }
@@ -289,10 +300,9 @@ fn remove(ask_data: bool) -> Result<(), String> {
         let _ = RegDeleteTreeW(HKEY_LOCAL_MACHINE, &HSTRING::from(UNINSTALL_KEY));
     }
     let _ = std::fs::remove_file(shortcut());
-    let mut c = Command::new(windows_program("System32\\schtasks.exe"));
-    c.args(["/Delete", "/F", "/TN", TASK]);
-    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
-    let _ = c.output();
+    delete_task(TASK);
+    delete_task(CAMERA_TASK);
+    crate::camera::unhide();
     for name in FILES {
         let path = dir.join(name);
         if std::fs::remove_file(&path).is_err() {
@@ -333,6 +343,38 @@ fn add_sign_in_task(dir: &Path) -> Result<(), String> {
 "#,
         opal_ipc::autostart::SIGN_IN
     );
+    add_task(TASK, &xml)
+}
+
+/// The camera's own webcam gives apps no video while opal-rs runs it, so it is switched off when Windows first sets
+/// it up for a camera (the first start of each camera under opal-rs). This task does that as the system.
+fn add_camera_task(dir: &Path) -> Result<(), String> {
+    let setup = dir.join(SETUP).display().to_string().replace('&', "&amp;");
+    let query = "<QueryList><Query Id=\"0\" Path=\"Microsoft-Windows-Kernel-PnP/Configuration\"><Select \
+                 Path=\"Microsoft-Windows-Kernel-PnP/Configuration\">*[System[EventID=400]]</Select></Query></QueryList>"
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Switches off the Opal C1's own webcam, which has no video while opal-rs runs the camera, when Windows first sets it up.</Description></RegistrationInfo>
+  <Triggers><EventTrigger><Enabled>true</Enabled><Subscription>{query}</Subscription></EventTrigger></Triggers>
+  <Principals><Principal id="System"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="System"><Exec><Command>"{setup}"</Command><Arguments>{HIDE_CAMERA}</Arguments></Exec></Actions>
+</Task>
+"#
+    );
+    add_task(CAMERA_TASK, &xml)
+}
+
+/// Adds or replaces a scheduled task from its XML.
+fn add_task(name: &str, xml: &str) -> Result<(), String> {
     let file = std::env::temp_dir().join(format!("opal-rs-task-{}.xml", std::process::id()));
     let bytes: Vec<u8> = [0xFEFF]
         .into_iter()
@@ -341,18 +383,25 @@ fn add_sign_in_task(dir: &Path) -> Result<(), String> {
         .collect();
     std::fs::write(&file, bytes).map_err(|e| format!("Cannot write {}: {e}", file.display()))?;
     let mut c = Command::new(windows_program("System32\\schtasks.exe"));
-    c.args(["/Create", "/F", "/TN", TASK, "/XML"]).arg(&file);
+    c.args(["/Create", "/F", "/TN", name, "/XML"]).arg(&file);
     std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
     let out = c.output();
     let _ = std::fs::remove_file(&file);
     match out {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(format!(
-            "Adding the sign-in task failed: {}",
+            "Adding the task {name} failed: {}",
             String::from_utf8_lossy(&o.stderr).trim()
         )),
         Err(e) => Err(format!("schtasks: {e}")),
     }
+}
+
+fn delete_task(name: &str) {
+    let mut c = Command::new(windows_program("System32\\schtasks.exe"));
+    c.args(["/Delete", "/F", "/TN", name]);
+    std::os::windows::process::CommandExt::creation_flags(&mut c, opal_ipc::NO_WINDOW);
+    let _ = c.output();
 }
 
 /// Stops this account starting the removed tray at sign-in.

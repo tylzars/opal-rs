@@ -17,7 +17,9 @@ and confirmed once after a restart. If the install says v4l2loopback is already 
 ### Windows
 Run `opal-rs-setup.exe` and allow it to make changes. It installs into `C:\Program Files\opal-rs`, sets up the
 "Opal C1 Virtual" camera, starts the tray icon at sign-in, adds "Opal C1 Control" to the Start menu and offers
-to start right away.
+to start right away. It also switches off the camera's own webcam device that Windows sets up when opal-rs first
+starts the camera: it gives no video at the sizes applications ask for. Device Manager can switch it back on, and
+uninstalling does.
 
 Windows 11 is needed. On Windows 10, which has no virtual cameras, Opal C1 works as a plain webcam without opal-rs.
 
@@ -28,8 +30,8 @@ image, which holds the files the camera needs:
 2. **Choose the file** that was downloaded. It can be deleted afterwards.
 
 ## Everyday use
-- In applications, choose **"Opal C1 Virtual"**. Applications also list the camera's own "Opal C1", which gives
-  no video while opal-rs runs the camera (except in low power mode on Linux).
+- In applications, choose **"Opal C1 Virtual"**. On Linux, applications also list the camera's own "Opal C1",
+  which gives no video while opal-rs runs the camera (except in low power mode).
 - The camera runs while an app uses it and stops shortly after the last one closes, and while the screen is
   locked. Its light is white while it sends video.
 - **Opal C1 Control** shows a preview and has every setting. The **tray icon** shows when the camera is on, turns
