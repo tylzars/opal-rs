@@ -233,7 +233,9 @@ fn answer_idle(stream: opal_ipc::Stream, outputs: &Mutex<Option<output::Outputs>
             request_stop();
             "ok".to_owned()
         }
-        // The virtual cameras stay open between sessions, so changing them works the same without a camera.
+        // The virtual cameras stay open between sessions, so listing and changing them works the same without a
+        // camera.
+        ["cameras"] => output::describe(outputs.locked().as_ref()),
         ["cameras", "release"] => {
             if let Some(o) = outputs.locked().as_mut() {
                 o.release();

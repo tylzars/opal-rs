@@ -116,6 +116,23 @@ pub fn configured() -> Vec<Camera> {
         .unwrap_or_else(|| vec![main_camera()])
 }
 
+/// Extra cameras still there but no longer set up: removed while the module could not reload. Apps still list
+/// them until it does.
+pub fn leftovers(wanted: &[Camera]) -> Vec<Camera> {
+    EXTRA
+        .filter_map(|nr| {
+            let dir = PathBuf::from(format!("/sys/class/video4linux/video{nr}"));
+            // v4l2loopback's devices have no hardware behind them; a real camera can get these numbers too.
+            if !std::fs::canonicalize(&dir).is_ok_and(|p| p.starts_with("/sys/devices/virtual")) {
+                return None;
+            }
+            let name = std::fs::read_to_string(dir.join("name")).ok()?.trim().to_owned();
+            let camera = Camera { nr, name };
+            (!wanted.contains(&camera)).then_some(camera)
+        })
+        .collect()
+}
+
 /// Checks a new camera's name: plain letters and digits with a few marks, so it survives the module options and
 /// the control lines, and different from the others.
 pub fn check_name(name: &str, cameras: &[Camera]) -> Result<()> {

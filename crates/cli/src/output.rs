@@ -236,7 +236,8 @@ pub fn describe(outputs: Option<&Outputs>) -> String {
                 .into_iter()
                 .filter(|c| main.as_ref().is_none_or(|m| m.nr != c.nr)),
         );
-        let leaving: Vec<Camera> = outputs
+        // Removed ones still there: one an app still uses, or one waiting for the module to reload.
+        let mut leaving: Vec<Camera> = outputs
             .map(|o| {
                 o.sinks
                     .iter()
@@ -245,6 +246,11 @@ pub fn describe(outputs: Option<&Outputs>) -> String {
                     .collect()
             })
             .unwrap_or_default();
+        for c in cameras::leftovers(&all) {
+            if !leaving.contains(&c) {
+                leaving.push(c);
+            }
+        }
         let wanted = all.len();
         all.extend(leaving);
         all.iter()
@@ -252,7 +258,7 @@ pub fn describe(outputs: Option<&Outputs>) -> String {
             .map(|(i, c)| {
                 let sink = outputs.and_then(|o| o.sinks.iter().find(|s| s.camera == *c));
                 let state = match sink {
-                    Some(_) if i >= wanted => "leaving",
+                    _ if i >= wanted => "leaving",
                     Some(_) => "on",
                     None if c.present() => "off",
                     None => "restart",
