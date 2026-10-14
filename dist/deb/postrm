@@ -2,6 +2,7 @@
 # The USB rule is gone with the package; stop applying it. Purging also removes the extra virtual cameras.
 set -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
+    rm -f /etc/systemd/user/default.target.wants/opal-rs.service
     udevadm control --reload-rules || true
 fi
 if [ "$1" = purge ]; then
@@ -9,4 +10,5 @@ if [ "$1" = purge ]; then
     if [ -f "$f" ] && head -n 1 "$f" | grep -q '^# Written by opal-rs'; then
         rm -f "$f"
     fi
+    rm -rf /var/lib/opal-rs
 fi

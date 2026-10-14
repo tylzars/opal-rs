@@ -3,7 +3,7 @@
 How to build opal-rs from scratch, how the code is laid out, and how to build the release packages.
 
 ## What you need
-- Rust (stable), from [rustup.rs](https://rustup.rs).
+- Rust 1.89 or newer, from [rustup.rs](https://rustup.rs).
 - Your own copy of `Opal_Composer_2.0.0_24.dmg`, from Opal's download page, at `assets/` (see
   [assets/README.md](assets/README.md)). Nothing from it is ever committed: `.gitignore` keeps it out.
 - Linux: `v4l2loopback` (`sudo apt install v4l2loopback-dkms` if your kernel lacks it), and for the control panel
@@ -18,7 +18,7 @@ cargo build --release
 target/release/opal-rs assets extract          # copies the camera files out of the disk image, checks each SHA-256
 
 # Camera access without root, and the "Opal C1 Virtual" camera now and at every start:
-sudo cp dist/70-opal-c1.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+sudo cp dist/70-opal-c1.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
 sudo cp dist/v4l2loopback.conf /etc/modprobe.d/
 echo v4l2loopback | sudo tee /etc/modules-load.d/v4l2loopback.conf
 sudo modprobe v4l2loopback
@@ -55,7 +55,7 @@ cargo xtask all     # both
 - The .deb's install scripts are in `dist/deb/`; its contents are listed under `[package.metadata.deb]` in
   `crates/cli/Cargo.toml`.
 - The version comes from `[workspace.package]` in `Cargo.toml`.
-- GitHub builds both on every push (`.github/workflows/build.yml`), after the format, lint and test checks below,
+- GitHub builds both on every push to main and every pull request (`.github/workflows/build.yml`), after the format, lint and test checks below,
   and keeps them as a download on the run. Pushing a tag such as `v1.0.0` also publishes them as a GitHub release.
 
 ## Tests and checks

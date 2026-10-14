@@ -8,7 +8,8 @@ Ubuntu 24.04, Debian 13 or newer. Other Linux systems: see [DEVELOPING.md](DEVEL
 sudo apt install ./opal-rs_1.0.0-1_amd64.deb
 ```
 Then log out and back in (or restart, after installing `v4l2loopback-dkms`). The tray icon starts at sign-in and
-starts the camera service.
+starts the camera service. On Debian with GNOME the icon needs the AppIndicator extension
+(`sudo apt install gnome-shell-extension-appindicator`, then log out and back in); the camera works without it.
 
 The "Opal C1 Virtual" camera uses the kernel's `v4l2loopback` module, which Ubuntu 24.04 includes. If the install
 says the kernel has none, also install `v4l2loopback-dkms`; with Secure Boot on, that asks for a password to be set

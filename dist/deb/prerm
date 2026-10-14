@@ -1,0 +1,9 @@
+#!/bin/sh
+# Removing the package stops what still runs from it, in every account. The service parks the camera as it stops.
+set -e
+if [ "$1" = remove ]; then
+    pkill -TERM -x opal-rs-tray || true
+    pkill -TERM -x opal-rs-gui || true
+    # Only the service: `opal-rs uninstall`, which runs this removal, has the same name.
+    pkill -TERM -f '^/usr/bin/opal-rs run( |$)' || true
+fi

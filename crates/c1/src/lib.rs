@@ -218,7 +218,8 @@ pub enum Mode {
 }
 
 /// Camera video, person segmentation, face detection and hand landmarks to the host over XLink, microphone into UAC,
-/// with control streams. Low power modes have no networks.
+/// with control streams. Low power modes have no networks, and in `Webcam` the video goes to the camera's own USB video
+/// output instead.
 pub fn pipeline(
     asset_dir: &Path,
     sensor: &str,

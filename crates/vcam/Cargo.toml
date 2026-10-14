@@ -3,6 +3,7 @@ name = "opal-vcam"
 description = "Windows virtual camera for opal-rs: a Media Foundation media source and the service's side of its frames"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [lib]

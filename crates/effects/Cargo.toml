@@ -3,6 +3,7 @@ name = "opal-effects"
 description = "Image effects for NV12 video frames"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

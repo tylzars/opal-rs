@@ -3,6 +3,7 @@ name = "xtask"
 description = "Builds the opal-rs packages: cargo xtask deb, cargo xtask exe"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

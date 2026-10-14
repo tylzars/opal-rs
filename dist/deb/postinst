@@ -2,6 +2,8 @@
 # Applies the USB rule and the virtual camera now.
 set -e
 if [ "$1" = configure ]; then
+    # Older versions started the service for every account; the tray starts it now, at sign-in, when wanted.
+    rm -f /etc/systemd/user/default.target.wants/opal-rs.service
     udevadm control --reload-rules || true
     udevadm trigger --subsystem-match=usb --attr-match=idVendor=03e7 || true
     if ! modinfo v4l2loopback >/dev/null 2>&1; then

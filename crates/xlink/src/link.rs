@@ -351,6 +351,14 @@ impl Link {
             Err(e) => return Err(e),
         };
         if r.flags & ACK == 0 {
+            // Refused, so the device holds nothing to release later: give the room back.
+            let mut st = self.shared.state.locked();
+            if let Some(s) = st.streams.get_mut(&stream.0) {
+                s.remote_fill = s.remote_fill.saturating_sub(n);
+                s.remote_packets = s.remote_packets.saturating_sub(1);
+            }
+            drop(st);
+            self.shared.cond.notify_all();
             return Err(Error::Refused("write"));
         }
         Ok(())

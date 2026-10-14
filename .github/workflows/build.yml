@@ -22,13 +22,13 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup target add x86_64-pc-windows-gnu
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: MinGW linker and cargo-deb
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
           cargo install cargo-deb --locked
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --all --check

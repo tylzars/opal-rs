@@ -9,6 +9,12 @@ use opal_dai::device::Device;
 
 pub fn run(dir: &Path, flicker: &str) -> Result<()> {
     let banding = crate::mains::mode(flicker).context("flicker is off, 50, 60 or auto")?;
+    if !crate::assets_ready(dir) {
+        anyhow::bail!(
+            "camera files missing or damaged in {}: run `opal-rs assets extract <disk image>`",
+            dir.display()
+        );
+    }
     crate::on_stop()?;
     let booted = crate::boot(dir, true, false)?;
     let dev = Device::connect(&booted, |m| eprintln!("[{}] {}", m.node_id_name, m.payload))?;

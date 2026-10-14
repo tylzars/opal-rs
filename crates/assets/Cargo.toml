@@ -3,6 +3,7 @@ name = "opal-assets"
 description = "Extracts Opal C1 camera files from an Opal Composer disk image"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

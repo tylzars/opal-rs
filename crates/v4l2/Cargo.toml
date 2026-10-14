@@ -3,6 +3,7 @@ name = "opal-v4l2"
 description = "Minimal V4L2 capture and output"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
