@@ -11,7 +11,7 @@ mod theme;
 mod view;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -300,11 +300,85 @@ fn poll_status_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Arc<Mutex
     out
 }
 
+/// What the window asks of the command thread.
+enum Job {
+    Send(String),
+    /// Read the settings again, after the commands before it.
+    Reload,
+}
+
+/// The command thread's end in the window: commands go out in order without the window waiting on the service.
+struct Commands {
+    jobs: std::sync::mpsc::Sender<Job>,
+    /// Why commands did not go through, oldest first, until the window shows them.
+    errors: Arc<Mutex<Vec<String>>>,
+    reloaded: Arc<Mutex<Option<Controls>>>,
+}
+
+/// Two steps of one slider: the same words, differing only in numbers (a sticker's own number counts as a word).
+fn same_slider(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<&str>, Vec<&str>) = (a.split_whitespace().collect(), b.split_whitespace().collect());
+    let number = |w: &str| w.parse::<f64>().is_ok();
+    // Presets and new stickers are each their own, numbers or not.
+    let own = matches!(a.as_slice(), ["preset", ..] | ["sticker", "add", ..]);
+    a != b
+        && !own
+        && a.len() == b.len()
+        && a.iter().any(|w| number(w))
+        && a.iter()
+            .zip(&b)
+            .enumerate()
+            .all(|(i, (x, y))| x == y || (number(x) && number(y) && !(i == 2 && a[0] == "sticker")))
+}
+
+fn command_thread(ctx: egui::Context, lists: Arc<Mutex<Lists>>) -> Commands {
+    let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+    let errors: Arc<Mutex<Vec<String>>> = Arc::default();
+    let reloaded: Arc<Mutex<Option<Controls>>> = Arc::default();
+    let (out, done) = (errors.clone(), reloaded.clone());
+    std::thread::spawn(move || {
+        while let Ok(first) = queue.recv() {
+            // What piled up while the last command was out: a slider dragged meanwhile sends only where it ended.
+            let mut batch = vec![first];
+            batch.extend(queue.try_iter());
+            let keep: Vec<bool> = (0..batch.len())
+                .map(|i| match (&batch[i], batch.get(i + 1)) {
+                    (Job::Send(a), Some(Job::Send(b))) => !same_slider(a, b),
+                    _ => true,
+                })
+                .collect();
+            for (job, keep) in batch.into_iter().zip(keep) {
+                match job {
+                    Job::Send(c) if keep => {
+                        let r = send(&c);
+                        if let Err(e) = r {
+                            out.locked().push(e);
+                        }
+                        if c.starts_with("preset ") || c.starts_with("sticker ") {
+                            lists.locked().stale = true;
+                        }
+                    }
+                    Job::Send(_) => {}
+                    Job::Reload => match load_settings() {
+                        (c, e) if e.is_empty() => *done.locked() = Some(c),
+                        (_, e) => out.locked().push(e),
+                    },
+                }
+            }
+            ctx.request_repaint();
+        }
+    });
+    Commands { jobs, errors, reloaded }
+}
+
 struct App {
     c: Controls,
     mode: Mode,
     status: String,
     message: String,
+    commands: Commands,
+    /// When a command last went out: status read before it lands could undo what the window shows.
+    last_command: Option<Instant>,
     /// Newest status line, filled by a polling thread so a slow service never stalls the window.
     latest: Arc<Mutex<Option<String>>>,
     lists: Arc<Mutex<Lists>>,
@@ -339,6 +413,8 @@ impl App {
             mode: Mode::Auto,
             status: String::new(),
             message,
+            commands: command_thread(cc.egui_ctx.clone(), lists.clone()),
+            last_command: None,
             latest: poll_status_thread(cc.egui_ctx.clone(), lists.clone()),
             lists,
             preview: preview::Handle::default(),
@@ -355,11 +431,28 @@ impl App {
         }
     }
 
+    /// Sends a command in the background, in order.
     fn apply(&mut self, command: String) {
-        self.message = match send(&command) {
-            Ok(_) => String::new(),
-            Err(e) => format!("{command}: {e}"),
-        };
+        self.last_command = Some(Instant::now());
+        // The last error goes once something else is asked for.
+        self.message.clear();
+        let _ = self.commands.jobs.send(Job::Send(command));
+    }
+
+    /// Asks for the saved settings again once the commands before have gone out.
+    fn reload(&mut self) {
+        let _ = self.commands.jobs.send(Job::Reload);
+    }
+
+    /// Takes what the command thread reports.
+    fn take_results(&mut self) {
+        if let Some(e) = self.commands.errors.locked().drain(..).next_back() {
+            self.message = e;
+        }
+        if let Some(c) = self.commands.reloaded.locked().take() {
+            self.c = c;
+            self.view.settings_changed(&self.c);
+        }
     }
 
     /// Word following `key` in the status line.
@@ -398,20 +491,22 @@ impl App {
     }
 
     fn poll_status(&mut self) {
+        self.take_results();
         let Some(status) = self.latest.locked().take() else {
             return;
         };
         self.status = status;
         let connected = self.status.starts_with("mode ");
         if connected && !self.connected {
-            // The service came back: show what it has saved.
-            let (c, message) = load_settings();
-            self.c = c;
-            self.message = message;
-            self.view = view::State::new(&self.c);
+            // The service came back: show what it has saved, read in the background.
+            self.reload();
+            self.view.settings_changed(&self.c);
             self.preview.stop();
         }
         self.connected = connected;
+        if self.last_command.is_some_and(|t| t.elapsed() < Duration::from_secs(2)) {
+            return;
+        }
         // A pinch can turn face following on or off from the camera.
         let mut words = self.status.split_whitespace();
         if words.any(|w| w == "zoom")
@@ -471,5 +566,31 @@ pub(crate) trait LockExt<T> {
 impl<T> LockExt<T> for std::sync::Mutex<T> {
     fn locked(&self) -> std::sync::MutexGuard<'_, T> {
         self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_slider;
+
+    #[test]
+    fn merges_only_steps_of_one_slider() {
+        assert!(same_slider("blur 10", "blur 12"));
+        assert!(same_slider("warmth -5", "warmth 3"));
+        assert!(same_slider("lut C:\\a b.cube 0.5", "lut C:\\a b.cube 0.7"));
+        assert!(same_slider("sticker move 2 0.5 0.5 0.1", "sticker move 2 0.6 0.5 0.1"));
+        assert!(!same_slider("sticker move 2 0.5 0.5 0.1", "sticker move 3 0.5 0.5 0.1"));
+        assert!(!same_slider("video on", "video on"));
+        assert!(!same_slider(
+            "sticker add text 0.5 0.9 0.08 - white Hi",
+            "sticker add text 0.5 0.9 0.08 - white Yo"
+        ));
+        assert!(!same_slider("blur 10", "warmth 10"));
+        assert!(!same_slider("blur 10", "blur 10"));
+        assert!(!same_slider("preset delete 1", "preset delete 2"));
+        assert!(!same_slider(
+            "sticker add clock 0.9 0.07 0.06 - white",
+            "sticker add clock 0.9 0.07 0.06 - white"
+        ));
     }
 }

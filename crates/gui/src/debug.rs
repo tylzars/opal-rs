@@ -29,7 +29,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         if app.status_value("video") == Some("off") {
             ui.horizontal(|ui| {
-                ui.label("Video is off. Make a peace sign to turn it back on, or");
+                ui.label(if app.c.gestures && app.c.peace {
+                    "Video is off. Make a peace sign to turn it back on, or"
+                } else {
+                    "Video is off."
+                });
                 if ui.button("Turn video back on").clicked() {
                     app.apply("video on".into());
                 }

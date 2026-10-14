@@ -26,7 +26,8 @@ pub enum Source {
     /// Small frames asked of the service. Apps keep the virtual camera to themselves: v4l2loopback lets only one
     /// program read it at a time.
     Service,
-    /// A video device of `width` x `height` NV12 frames (low power mode, where video does not pass through here).
+    /// A video device of `width` x `height` NV12 frames (the camera's own video in low power mode on Linux, which does
+    /// not pass through the service).
     Device(Option<PathBuf>, (usize, usize)),
 }
 

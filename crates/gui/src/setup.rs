@@ -90,9 +90,13 @@ impl Setup {
         );
         ui.add_space(12.0);
         ui.label(RichText::new("1. Download Opal Composer 2.0 from Opal's site.").strong());
-        if ui.button("Open Opal's download page").clicked() {
-            open_page();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Open Opal's download page").clicked() {
+                open_page();
+            }
+            // For typing into a browser by hand, should none open.
+            ui.label(RichText::new(OPAL_PAGE).weak());
+        });
         ui.add_space(12.0);
         ui.label(RichText::new(format!("2. Choose the downloaded file, {DMG_NAME}.")).strong());
         let busy = phase == Phase::Extracting;
@@ -138,12 +142,11 @@ impl Setup {
                 if field.changed() {
                     *self.path.locked() = text.clone();
                 }
-                if ui
-                    .add_enabled(!text.trim().is_empty(), egui::Button::new("Use it"))
-                    .clicked()
-                {
+                // As pasted from "Copy as path", in quotes.
+                let typed = text.trim().trim_matches('"').trim();
+                if ui.add_enabled(!typed.is_empty(), egui::Button::new("Use it")).clicked() {
                     extract(
-                        text.trim().to_owned(),
+                        typed.to_owned(),
                         self.phase.clone(),
                         self.progress.clone(),
                         ui.ctx().clone(),
@@ -203,10 +206,10 @@ fn extract(dmg: String, phase: Arc<Mutex<Phase>>, progress: Arc<Mutex<Vec<String
                 ));
             }
             if !ok {
-                return Err(if err.is_empty() {
+                return Err(if err.trim().is_empty() {
                     "The camera files could not be copied.".into()
                 } else {
-                    err
+                    err.trim().to_owned()
                 });
             }
             // The panel itself says when the service is not running.

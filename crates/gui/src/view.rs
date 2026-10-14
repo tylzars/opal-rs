@@ -92,6 +92,9 @@ pub struct State {
     more: bool,
     /// The help page is open.
     help: bool,
+    /// When "Start it" was last clicked, and why starting failed, if it did.
+    start_clicked: Option<Instant>,
+    start_error: Arc<Mutex<Option<String>>>,
     /// Open the help page scrolled to the top.
     help_top: bool,
     /// Background picture switched on, waiting for a file.
@@ -108,7 +111,8 @@ pub struct State {
     can_browse: bool,
     /// Do not reopen the preview before this, while the camera restarts.
     hold: Option<Instant>,
-    /// Low power mode only: the preview was asked for. It reads the camera itself, which then turns apps away.
+    /// Apps use the camera's own video (low power on Linux): the preview was asked for. It reads the camera itself,
+    /// which then turns apps away.
     camera_preview: bool,
     /// The colour picked in the Colours card.
     colour: usize,
@@ -136,6 +140,19 @@ pub struct State {
 }
 
 impl State {
+    /// Catches up with settings loaded from the service, keeping what is open or typed.
+    pub fn settings_changed(&mut self, c: &Controls) {
+        self.custom_look = !opal_effects::LOOKS.contains(&c.look.as_str());
+        self.look_file = if self.custom_look {
+            c.look.clone()
+        } else {
+            String::new()
+        };
+        self.camera_preview = false;
+        self.autostart = opal_ipc::autostart::enabled();
+        *self.start_error.locked() = None;
+    }
+
     pub fn new(c: &Controls) -> Self {
         let custom_look = !opal_effects::LOOKS.contains(&c.look.as_str());
         let to_color = |[r, g, b]: [f32; 3]| {
@@ -153,6 +170,8 @@ impl State {
         Self {
             more: false,
             help: false,
+            start_clicked: None,
+            start_error: Arc::default(),
             help_top: false,
             picking_background: false,
             reveal_look: true,
@@ -272,6 +291,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     keep_preview(app, &ctx);
     app.update_texture(&ctx);
     let mut cmds = Vec::new();
+    if app.view.help {
+        help(app, ui);
+        return;
+    }
     if let Some((pick, path)) = app.view.picked.locked().take() {
         match pick {
             Pick::Background => {
@@ -291,10 +314,6 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     }
 
-    if app.view.help {
-        help(app, ui);
-        return;
-    }
     let wide = ui.available_width() >= WIDE;
     if wide {
         egui::Panel::right("settings")
@@ -377,19 +396,13 @@ pub(crate) fn run(app: &mut App, cmds: Vec<String>) {
     let restart = cmds
         .iter()
         .any(|c| c.starts_with("resolution ") || c.starts_with("power "));
-    let presets = cmds
-        .iter()
-        .any(|c| c.starts_with("preset ") || c.starts_with("sticker "));
     let loaded = cmds.iter().any(|c| c.starts_with("preset load "));
     for cmd in cmds {
         app.apply(cmd);
     }
-    if presets {
-        app.lists.locked().stale = true;
-    }
     if loaded {
-        // A preset changes many settings at once; show what the service has now.
-        app.c = crate::load_settings().0;
+        // A preset changes many settings at once; show what the service has then.
+        app.reload();
     }
     if restart {
         // Reopen once the camera is back, with the new size.
@@ -455,8 +468,8 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
     // The service runs, but no camera session yet: what it waits for.
     let waiting = app.status.strip_prefix("waiting ").map(|c| c.trim().to_owned());
     let video_off = app.status_value("video") == Some("off");
-    let running = app.preview.running();
-    let showing = running && app.texture.is_some();
+    // Only while frames keep coming: a picture left from before would hide what the service waits for.
+    let showing = app.preview.live() && app.texture.is_some();
     if let (Some(t), true) = (&app.texture, showing) {
         egui::Image::new(t).corner_radius(radius).paint_at(ui, rect);
     }
@@ -495,7 +508,9 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
             .rect_filled(rect, radius, Color32::from_black_alpha(if showing { 200 } else { 0 }));
         centre(ui, 110.0, &mut |ui| {
             ui.label(egui::RichText::new("Video is off").size(20.0).strong().color(TEXT));
-            ui.label(egui::RichText::new("Make a peace sign to turn it back on, or").color(WEAK));
+            if app.c.gestures && app.c.peace {
+                ui.label(egui::RichText::new("Make a peace sign to turn it back on, or").color(WEAK));
+            }
             ui.add_space(6.0);
             if theme::primary(ui, "Turn video back on").clicked() {
                 app.apply("video on".into());
@@ -547,19 +562,36 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
                 if !detail.is_empty() {
                     ui.label(egui::RichText::new(&detail).color(WEAK));
                 }
-                if !connected && waiting.is_none() && theme::primary(ui, "Start it").clicked() {
-                    // In the background: starting can take a few seconds, and the status shows when it is up.
-                    std::thread::spawn(|| {
-                        if let Err(e) = opal_ipc::start_service() {
-                            eprintln!("starting the service: {e}");
-                        }
-                    });
+                let failed = app.view.start_error.locked().clone();
+                if !connected && let Some(e) = &failed {
+                    ui.label(egui::RichText::new("It did not start. Try again, or restart the computer.").color(AMBER))
+                        .on_hover_text(e);
+                }
+                // Starting takes a few seconds, and the status shows when it is up; meanwhile one start is enough.
+                let starting = failed.is_none()
+                    && app
+                        .view
+                        .start_clicked
+                        .is_some_and(|t| t.elapsed() < Duration::from_secs(15));
+                if !connected && waiting.is_none() {
+                    if starting {
+                        ui.label(egui::RichText::new("Starting...").color(WEAK));
+                    } else if theme::primary(ui, "Start it").clicked() {
+                        app.view.start_clicked = Some(Instant::now());
+                        let error = app.view.start_error.clone();
+                        *error.locked() = None;
+                        std::thread::spawn(move || {
+                            if let Err(e) = opal_ipc::start_service() {
+                                *error.locked() = Some(e.to_string());
+                            }
+                        });
+                    }
                 }
             },
         );
     }
 
-    // In low power mode the preview holds the camera: offer to give it back to apps.
+    // A preview of the camera's own video holds the camera: offer to give it back to apps.
     if connected && app.c.own_video() && app.view.camera_preview {
         let r = Rect::from_min_size(rect.right_bottom() + vec2(-140.0, -48.0), vec2(126.0, 34.0));
         if ui.put(r, egui::Button::new("Stop preview")).clicked() {
@@ -616,11 +648,16 @@ fn stage(app: &mut App, ui: &mut Ui, size: egui::Vec2) {
 /// Which camera to pick in apps. On Linux they also list the camera's own "Opal C1", which has video only in low
 /// power mode.
 fn camera_hint(app: &App, ui: &mut Ui) {
-    if app.c.own_video() || !app.connected {
+    if !app.connected {
         return;
     }
+    let name = if app.c.own_video() {
+        "Opal C1"
+    } else {
+        "Opal C1 Virtual"
+    };
     ui.add_space(8.0);
-    ui.label(egui::RichText::new("In applications, choose \"Opal C1 Virtual\".").color(WEAK));
+    ui.label(egui::RichText::new(format!("In applications, choose \"{name}\".")).color(WEAK));
 }
 
 fn message(app: &mut App, ui: &mut Ui) {
