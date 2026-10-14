@@ -19,8 +19,9 @@ const MAX_TRANSFER: usize = 1 << 20;
 const READ_DEPTH: usize = 4;
 #[cfg(windows)]
 const READ_DEPTH: usize = 1;
-/// Windows starts the interface's driver a moment after the device appears, so opening is retried for this long
-/// there. Well under the camera's 10 s watchdog, which resets it if nobody connects.
+/// Opening is retried for this long: Windows starts the interface's driver a moment after the device appears, and on
+/// Linux udev gives the user access a moment after. Well under the camera's 10 s watchdog, which resets it if nobody
+/// connects.
 const OPEN_WAIT: Duration = Duration::from_secs(5);
 const CONTROL_WAIT: Duration = Duration::from_secs(1);
 const GET_STATUS: u8 = 0;
@@ -80,10 +81,20 @@ fn claim(info: &nusb::DeviceInfo) -> io::Result<(nusb::Device, nusb::Interface)>
             .and_then(|d| Ok((d.detach_and_claim_interface(0).wait()?, d)));
         match result {
             Ok((iface, device)) => return Ok((device, iface)),
-            Err(_) if cfg!(windows) && start.elapsed() < OPEN_WAIT => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) if start.elapsed() < OPEN_WAIT && (cfg!(windows) || not_ready_yet(&e)) => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
             Err(e) => return Err(e.into()),
         }
     }
+}
+
+/// Linux: the device node is not there yet, or udev has not given the user access to it yet.
+fn not_ready_yet(e: &nusb::Error) -> bool {
+    matches!(
+        e.kind(),
+        nusb::ErrorKind::PermissionDenied | nusb::ErrorKind::NotFound | nusb::ErrorKind::Disconnected
+    )
 }
 
 /// A control request on the default pipe. Windows sends these only through a claimed interface.
